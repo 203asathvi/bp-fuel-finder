@@ -569,6 +569,39 @@
     font-size: 13px;
   }
 
+  /* DEBUG PANEL */
+  .debug-panel {
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(245,210,14,0.3);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    font-size: 11px;
+    font-family: monospace;
+    color: #aaa;
+    display: none;
+  }
+  .debug-panel.visible { display: block; }
+  .debug-panel .dlog { margin: 2px 0; line-height: 1.5; }
+  .debug-panel .dlog.ok  { color: #4dff91; }
+  .debug-panel .dlog.err { color: #ff7070; }
+  .debug-panel .dlog.warn { color: var(--bp-yellow); }
+  .debug-toggle {
+    font-size: 11px;
+    font-family: 'Barlow Condensed', sans-serif;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    background: transparent;
+    border: 1px solid var(--bp-border);
+    color: var(--bp-muted);
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-left: auto;
+    display: block;
+    margin-bottom: 8px;
+  }
+
   footer {
     text-align: center;
     font-size: 11px;
@@ -632,6 +665,9 @@
   <div class="progress-bar-wrap" id="progressWrap">
     <div class="progress-bar" id="progressBar"></div>
   </div>
+
+  <button class="debug-toggle" onclick="toggleDebug()">🔍 Show Debug Log</button>
+  <div class="debug-panel" id="debugPanel"></div>
 
   <div id="nationalSection" style="display:none">
     <div class="section-label">🇦🇺 Australian National Average Fuel Prices</div>
@@ -848,6 +884,24 @@ async function fetchBPStations(lat, lng, radiusM) {
   return elements;
 }
 
+// ─── DEBUG LOG ───────────────────────────────────────────────────────────────
+function dlog(msg, type = '') {
+  const panel = document.getElementById('debugPanel');
+  if (!panel) return;
+  const line = document.createElement('div');
+  line.className = `dlog ${type}`;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  panel.appendChild(line);
+  panel.scrollTop = panel.scrollHeight;
+  console.log(msg);
+}
+function toggleDebug() {
+  const panel = document.getElementById('debugPanel');
+  const btn   = document.querySelector('.debug-toggle');
+  panel.classList.toggle('visible');
+  btn.textContent = panel.classList.contains('visible') ? '🔍 Hide Debug Log' : '🔍 Show Debug Log';
+}
+
 // ─── GEOCODE CACHE (Firebase Realtime DB + localStorage fallback) ────────────
 // - localStorage: instant, works offline, per-device
 // - Firebase: syncs across all devices in real time
@@ -863,6 +917,11 @@ const LS_KEY     = 'bpff_geocache';
 // Falls back to localStorage-only if config.js is missing
 const _fbCfg = (typeof window !== 'undefined' && window.BPFF_CONFIG) || {};
 const FB_URL  = _fbCfg.FIREBASE_DB_URL || null; // e.g. 'https://your-app-default-rtdb.firebaseio.com'
+// Log Firebase status on startup
+window.addEventListener('load', () => {
+  if (FB_URL) dlog(`Firebase configured: ${FB_URL}`, 'ok');
+  else dlog('Firebase not configured — localStorage only', 'warn');
+});
 const FB_PATH = 'geocache';
 
 let _geoCache       = {};
@@ -897,10 +956,10 @@ async function fbRead() {
   try {
     // 5 second timeout — don't let Firebase hang the whole app
     const res = await fetchWithTimeout(`${FB_URL}/${FB_PATH}.json`, {}, 5000);
-    if (!res.ok) throw new Error(`Firebase HTTP ${res.status} — check Realtime Database rules`);
+    if (!res.ok) { dlog(`Firebase HTTP ${res.status} — check DB rules`, 'err'); throw new Error(`Firebase HTTP ${res.status}`); }
     return await res.json() || {};
   } catch(e) {
-    console.warn('Firebase read failed (geocoding will use localStorage only):', e.message);
+    dlog('Firebase read FAILED: ' + e.message, 'err'); console.warn(e);
     return null;
   }
 }
@@ -914,7 +973,7 @@ async function fbWrite(data) {
       body: JSON.stringify(data),
     }, 5000);
   } catch(e) {
-    console.warn('Firebase write failed:', e.message);
+    dlog('Firebase write FAILED: ' + e.message, 'err');
   }
 }
 
@@ -925,7 +984,7 @@ async function loadGeoCache() {
   // 1. Load localStorage immediately — geocoding can start right away
   _geoCache = lsLoad();
   const localCount = Object.keys(_geoCache).length;
-  console.log(`Geocache: ${localCount} entries from localStorage`);
+  dlog(`localStorage: ${localCount} cached entries`, localCount > 0 ? 'ok' : 'warn');
 
   // Mark as loaded immediately so geocoding isn't blocked by Firebase
   _geoCacheLoaded = true;
@@ -944,7 +1003,7 @@ async function loadGeoCache() {
       }
       if (merged > 0) {
         lsSave(_geoCache);
-        console.log(`Geocache: merged ${merged} entries from Firebase (background)`);
+        dlog(`Firebase: merged ${merged} new entries`, 'ok');
       }
     }).catch(e => console.warn('Firebase background merge failed:', e.message));
   }
@@ -958,7 +1017,7 @@ async function saveGeoCache(newEntries) {
     await fbWrite(newEntries); // only push new/updated keys — saves bandwidth
   }
   _geoDirty = false;
-  console.log(`Geocache: saved ${Object.keys(newEntries).length} new entries`);
+  dlog(`Saved ${Object.keys(newEntries).length} new entries to cache`, 'ok');
 }
 
 // ── Reverse geocode with cache ────────────────────────────────────────────
@@ -968,7 +1027,7 @@ async function reverseGeocode(lat, lng) {
 
   // Return cached entry if fresh
   if (_geoCache[key] && (now - (_geoCache[key].ts || 0)) < GEO_TTL_MS) {
-    console.log(`Geocache HIT: ${key} → "${_geoCache[key].suburb}"`);
+    dlog(`Cache HIT: ${key} → "${_geoCache[key].suburb}"`, "ok");
     return _geoCache[key];
   }
 
@@ -988,11 +1047,11 @@ async function reverseGeocode(lat, lng) {
         return _geoCache[key];
       }
     } catch(e) {
-      console.warn('Geocoder failed, trying next:', e.message);
+      dlog('Geocoder failed, trying next: ' + e.message, 'warn');
     }
   }
 
-  console.warn(`All geocoders failed for ${key}`);
+  dlog(`All geocoders failed for ${key}`, 'err');
   return _geoCache[key] || null;
 }
 
