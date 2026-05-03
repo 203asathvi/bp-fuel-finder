@@ -930,7 +930,22 @@ let _geoDirty       = false;
 
 // ── localStorage helpers ──────────────────────────────────────────────────
 function lsLoad() {
-  try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch(e) { return {}; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+    // Clean corrupted entries where suburb is missing/undefined
+    const clean = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (v && v.suburb && v.suburb !== 'undefined' && v.suburb !== '') {
+        clean[k] = v;
+      }
+    }
+    const removed = Object.keys(raw).length - Object.keys(clean).length;
+    if (removed > 0) {
+      console.log(`Geocache: cleaned ${removed} corrupted entries`);
+      localStorage.setItem(LS_KEY, JSON.stringify(clean));
+    }
+    return clean;
+  } catch(e) { return {}; }
 }
 function lsSave(data) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch(e) {}
@@ -996,6 +1011,8 @@ async function loadGeoCache() {
       if (!cloud || Object.keys(cloud).length === 0) return;
       let merged = 0;
       for (const [k, v] of Object.entries(cloud)) {
+        // Skip corrupted entries
+        if (!v || !v.suburb || v.suburb === 'undefined' || v.suburb === '') continue;
         if (!_geoCache[k] || (v.ts || 0) > (_geoCache[k].ts || 0)) {
           _geoCache[k] = v;
           merged++;
@@ -1004,6 +1021,8 @@ async function loadGeoCache() {
       if (merged > 0) {
         lsSave(_geoCache);
         dlog(`Firebase: merged ${merged} new entries`, 'ok');
+        // Push cleaned cache back to Firebase to remove corrupted entries
+        fbWrite(_geoCache).catch(() => {});
       }
     }).catch(e => console.warn('Firebase background merge failed:', e.message));
   }
@@ -1064,10 +1083,12 @@ async function geocodeViaNominatim(lat, lng) {
   if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
   const data = await res.json();
   const addr = data.address || {};
-  const suburb = addr.suburb || addr.neighbourhood || addr.town || addr.village || addr.city_district || addr.city || '';
-  const street = [addr.house_number, addr.road].filter(Boolean).join(' ');
+  const suburb = addr.suburb || addr.neighbourhood || addr.quarter || addr.hamlet ||
+                 addr.town || addr.village || addr.city_district || addr.municipality || addr.city || '';
+  const street  = [addr.house_number, addr.road || addr.pedestrian || addr.path].filter(Boolean).join(' ');
   const postcode = addr.postcode || '';
-  const state = addr.state || '';
+  const state   = addr.state || '';
+  if (!suburb) throw new Error('Nominatim: no suburb in response');
   return {
     suburb,
     postcode,
