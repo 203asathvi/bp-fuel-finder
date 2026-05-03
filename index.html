@@ -990,10 +990,21 @@ async function loadGeoCache() {
   // Geocoding proceeds with localStorage while Firebase loads
   if (FB_URL) {
     fbRead().then(cloud => {
-      if (!cloud || Object.keys(cloud).length === 0) return;
+      const cloudEmpty = !cloud || Object.keys(cloud).length === 0;
+
+      if (cloudEmpty) {
+        // Firebase is empty — push entire localStorage cache up to sync it
+        const localEntries = Object.keys(_geoCache).length;
+        if (localEntries > 0) {
+          console.log(`Firebase empty — uploading ${localEntries} localStorage entries`);
+          fbWrite(_geoCache).catch(e => console.warn('Initial Firebase upload failed:', e));
+        }
+        return;
+      }
+
+      // Firebase has data — merge into local cache
       let merged = 0;
       for (const [k, v] of Object.entries(cloud)) {
-        // Skip corrupted entries
         if (!v || !v.suburb || v.suburb === 'undefined' || v.suburb === '') continue;
         if (!_geoCache[k] || (v.ts || 0) > (_geoCache[k].ts || 0)) {
           _geoCache[k] = v;
@@ -1003,8 +1014,9 @@ async function loadGeoCache() {
       if (merged > 0) {
         lsSave(_geoCache);
         console.log(`Firebase: merged ${merged} new entries`);
-        // Push cleaned cache back to Firebase to remove corrupted entries
         fbWrite(_geoCache).catch(() => {});
+      } else {
+        console.log('Firebase: cache already up to date');
       }
     }).catch(e => console.warn('Firebase background merge failed:', e.message));
   }
