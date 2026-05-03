@@ -521,26 +521,22 @@
     border-color: #f5a030;
   }
 
-  .btn-gmaps {
-    background: rgba(66,133,244,0.1);
-    border: 1px solid rgba(66,133,244,0.35);
-    color: #7ab3ff;
+  .btn-copy {
+    background: rgba(150,150,150,0.1);
+    border: 1px solid rgba(150,150,150,0.3);
+    color: #aaa;
   }
 
-  .btn-gmaps:hover {
-    background: rgba(66,133,244,0.2);
-    border-color: #7ab3ff;
+  .btn-copy:hover {
+    background: rgba(150,150,150,0.2);
+    border-color: #ccc;
+    color: #fff;
   }
 
-  .btn-servosaver {
-    background: rgba(0,100,200,0.1);
-    border: 1px solid rgba(0,100,200,0.35);
-    color: #6aabff;
-  }
-
-  .btn-servosaver:hover {
-    background: rgba(0,100,200,0.2);
-    border-color: #6aabff;
+  .btn-copy.copied {
+    background: rgba(0,155,78,0.15);
+    border-color: rgba(0,155,78,0.4);
+    color: #4dff91;
   }
 
 
@@ -796,16 +792,28 @@ function setProgress(pct) {
 // ─── OVERPASS QUERY (optimised) ──────────────────────────────────
 // Mirrors tried in order — first success wins
 const OVERPASS_MIRRORS = [
-  'https://overpass.kumi.systems/api/interpreter',  // fast EU mirror
-  'https://overpass-api.de/api/interpreter',         // original (slower)
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter', // Russia mirror, often fast
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 
-async function queryOverpass(query, timeoutMs = 25000) {
-  for (const mirror of OVERPASS_MIRRORS) {
+// Station cache persists in localStorage — 30 min TTL
+const STATION_CACHE_KEY = 'bpff_stations';
+const STATION_TTL_MS    = 30 * 60 * 1000; // 30 minutes
+
+function loadStationCache() {
+  try { return JSON.parse(localStorage.getItem(STATION_CACHE_KEY) || '{}'); } catch(e) { return {}; }
+}
+function saveStationCache(cache) {
+  try { localStorage.setItem(STATION_CACHE_KEY, JSON.stringify(cache)); } catch(e) {}
+}
+
+async function queryOverpass(query, timeoutMs = 12000) {
+  // Race all mirrors simultaneously — fastest wins
+  const tryMirror = (mirror) => new Promise(async (resolve, reject) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
       const res = await fetch(mirror, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -813,38 +821,76 @@ async function queryOverpass(query, timeoutMs = 25000) {
         signal: controller.signal,
       });
       clearTimeout(timer);
-      if (!res.ok) continue;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      return data.elements || [];
+      resolve(data.elements || []);
     } catch(e) {
-      console.warn(`Mirror ${mirror} failed:`, e.message);
-      // try next mirror
+      clearTimeout(timer);
+      reject(e);
     }
-  }
-  throw new Error('All Overpass mirrors timed out or failed. Please try again in a moment.');
+  });
+
+  // Try mirrors with small stagger so fastest usually wins without hammering all at once
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let failed  = 0;
+
+    OVERPASS_MIRRORS.forEach((mirror, i) => {
+      setTimeout(() => {
+        if (settled) return;
+        tryMirror(mirror)
+          .then(data => {
+            if (!settled) {
+              settled = true;
+              console.log(`Overpass: ${mirror.split('/')[2]} responded`);
+              resolve(data);
+            }
+          })
+          .catch(e => {
+            failed++;
+            console.warn(`Overpass mirror failed: ${mirror.split('/')[2]} — ${e.message}`);
+            if (failed === OVERPASS_MIRRORS.length && !settled) {
+              reject(new Error('All Overpass mirrors failed. Please try again.'));
+            }
+          });
+      }, i * 800); // stagger 800ms apart — first mirror gets head start
+    });
+  });
 }
 
 async function fetchBPStations(lat, lng, radiusM) {
-  // Return cached result if same location + radius within last 5 minutes
+  // 1. Check in-memory cache (same session)
   const key = cacheKey(lat, lng, radiusM);
-  if (_cache[key] && Date.now() - _cache[key].ts < 5 * 60 * 1000) {
-    console.log('Using cached station data');
+  if (_cache[key] && Date.now() - _cache[key].ts < STATION_TTL_MS) {
+    console.log('Station cache HIT (memory)');
     return _cache[key].data;
   }
 
-  // Simplified query: union node+way in one pass using Overpass union shorthand
-  // Use brand~BP (case-insensitive) — catches "BP", "BP Express", "BP Connect" etc.
-  const q = `[out:json][timeout:30];(node["amenity"="fuel"]["brand"~"BP",i](around:${radiusM},${lat},${lng});way["amenity"="fuel"]["brand"~"BP",i](around:${radiusM},${lat},${lng}););out center tags qt;`;
+  // 2. Check localStorage cache (persists across sessions — 30 min TTL)
+  const lsCache = loadStationCache();
+  if (lsCache[key] && Date.now() - lsCache[key].ts < STATION_TTL_MS) {
+    console.log('Station cache HIT (localStorage)');
+    _cache[key] = lsCache[key]; // promote to memory
+    return lsCache[key].data;
+  }
+
+  // 3. Fetch from Overpass
+  const q = `[out:json][timeout:25];(node["amenity"="fuel"]["brand"~"BP",i](around:${radiusM},${lat},${lng});way["amenity"="fuel"]["brand"~"BP",i](around:${radiusM},${lat},${lng}););out center tags qt;`;
 
   setProgress(20);
-  showSpinner(radiusM > 20000 ? `Searching ${radiusM/1000} km radius — large areas take longer…` : 'Querying OpenStreetMap…');
+  showSpinner(radiusM > 20000 ? `Searching ${radiusM/1000} km radius…` : 'Querying OpenStreetMap…');
 
-  const elements = await queryOverpass(q, radiusM > 50000 ? 35000 : 20000);
+  const elements = await queryOverpass(q, radiusM > 50000 ? 30000 : 12000);
 
   setProgress(80);
   hideSpinner();
 
-  _cache[key] = { ts: Date.now(), data: elements };
+  // Save to both memory and localStorage
+  const entry = { ts: Date.now(), data: elements };
+  _cache[key] = entry;
+  lsCache[key] = entry;
+  saveStationCache(lsCache);
+
   return elements;
 }
 
@@ -1247,8 +1293,7 @@ function renderStations(stations, userLat, userLng, basePrice) {
 
     // Build all static URLs
     const mapsUrl          = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&travelmode=driving`;
-    const stationSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${sLat},${sLng},17z`;
-    const servoSaverUrl    = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
+    // stationSearchUrl and servoSaverUrl removed — using single Google Maps directions link
 
     let priceHtml = '—';
     if (basePrice) {
@@ -1277,19 +1322,35 @@ function renderStations(stations, userLat, userLng, basePrice) {
           <span class="best-price-label">Est. low price:</span>
           <span class="best-price">${priceHtml}</span>
         </div>
-        <a class="maps-link" id="dir-${idx}" target="_blank">🗺 Directions ↗</a>
+        <a class="maps-link" id="dir-${idx}" target="_blank">🗺 Google Maps ↗</a>
       </div>
       <div class="live-btn-row">
         <button class="live-price-btn btn-petrolspy" id="ps-${idx}">⛽ PetrolSpy Prices ↗</button>
-        <a class="live-price-btn btn-gmaps" id="gm-${idx}" target="_blank">📍 Station on Maps ↗</a>
-        <a class="live-price-btn btn-servosaver" id="sv-${idx}" target="_blank">🏛 Servo Saver ↗</a>
+        <button class="live-price-btn btn-copy" id="cp-${idx}">📋 Copy Address</button>
       </div>
     `;
 
-    // Static links — set href directly
+    // Directions link
     card.querySelector(`#dir-${idx}`).href = mapsUrl;
-    card.querySelector(`#gm-${idx}`).href  = stationSearchUrl;
-    card.querySelector(`#sv-${idx}`).href  = servoSaverUrl;
+
+    // Copy Address button — copies address then opens Waze hint
+    const cpBtn = card.querySelector(`#cp-${idx}`);
+    cpBtn.addEventListener('click', () => {
+      const textToCopy = address !== 'Address not listed'
+        ? address
+        : `${sLat}, ${sLng}`;  // fallback to coordinates if no address
+      navigator.clipboard.writeText(textToCopy).then(() => {
+        cpBtn.textContent = '✅ Copied!';
+        cpBtn.classList.add('copied');
+        setTimeout(() => {
+          cpBtn.textContent = '📋 Copy Address';
+          cpBtn.classList.remove('copied');
+        }, 2000);
+      }).catch(() => {
+        // Fallback for browsers that block clipboard
+        prompt('Copy this address:', textToCopy);
+      });
+    });
 
     // PetrolSpy — geocode at click time using exact station coordinates
     // This guarantees the correct suburb regardless of OSM data quality
