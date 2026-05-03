@@ -1004,20 +1004,23 @@ function renderStations(stations, userLat, userLng, basePrice) {
     // This guarantees the correct suburb regardless of OSM data quality
     const psBtn = card.querySelector(`#ps-${idx}`);
     psBtn.addEventListener('click', async () => {
-      // Show loading state on button
       const original = psBtn.textContent;
       psBtn.textContent = '⏳ Looking up suburb…';
       psBtn.disabled = true;
 
       try {
-        // Always geocode fresh from the station's actual coordinates
         const geo = await reverseGeocode(sLat, sLng);
         const suburb = (geo?.suburb || osmSuburb || '').toLowerCase().trim();
         const url = suburb
           ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(suburb)}`
           : `https://petrolspy.com.au/map/location/au/vic`;
+
+        // DEBUG — remove after confirming it works
+        alert(`Coords: ${sLat}, ${sLng}\nGeo result: ${JSON.stringify(geo)}\nSuburb: "${suburb}"\nURL: ${url}`);
+
         window.open(url, '_blank');
       } catch(e) {
+        alert(`ERROR: ${e.message}`);
         window.open('https://petrolspy.com.au/map/location/au/vic', '_blank');
       } finally {
         psBtn.textContent = original;
