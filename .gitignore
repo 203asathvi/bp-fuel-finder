@@ -1,0 +1,6 @@
+# Gitignored — never commit this file
+config.js
+
+# System files
+.DS_Store
+Thumbs.db
