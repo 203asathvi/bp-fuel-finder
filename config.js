@@ -20,5 +20,5 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 window.BPFF_CONFIG = {
-  FIREBASE_DB_URL: 'https://bp-fuel-tracker-default-rtdb.firebaseio.com/',
+  FIREBASE_DB_URL: 'https://bp-fuel-tracker-default-rtdb.firebaseio.com',
 };
