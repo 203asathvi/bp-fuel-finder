@@ -1104,6 +1104,18 @@ async function enrichStationsWithSuburb(stations) {
   const now = Date.now();
   const newEntries = {};
 
+  // Log all cache keys and station keys to debug mismatches
+  const cacheKeys = Object.keys(_geoCache);
+  dlog(`Cache has ${cacheKeys.length} keys. First few: ${cacheKeys.slice(0,3).join(' | ')}`, 'ok');
+
+  stations.forEach(s => {
+    const sLat = parseFloat(s.lat ?? s.center?.lat);
+    const sLng = parseFloat(s.lon  ?? s.center?.lon);
+    const key  = `${sLat.toFixed(4)},${sLng.toFixed(4)}`;
+    const hit  = !!_geoCache[key];
+    dlog(`Station key: ${key} → cache ${hit ? 'HIT ✅ ' + _geoCache[key].suburb : 'MISS ❌'}`, hit ? 'ok' : 'warn');
+  });
+
   // Split into cached (instant) and uncached (need API call)
   const cached   = stations.filter(s => {
     const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
@@ -1113,6 +1125,7 @@ async function enrichStationsWithSuburb(stations) {
     const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
     return !_geoCache[key] || (now - (_geoCache[key].ts || 0)) >= GEO_TTL_MS;
   });
+  dlog(`Split: ${cached.length} cached, ${uncached.length} uncached`, cached.length > 0 ? 'ok' : 'warn');
 
   // Apply cached immediately — zero latency
   for (const s of cached) {
