@@ -878,14 +878,29 @@ function lsSave(data) {
 }
 
 // ── Firebase REST helpers (no SDK needed — plain fetch) ───────────────────
+// Fetch with timeout helper
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch(e) {
+    clearTimeout(timer);
+    throw e;
+  }
+}
+
 async function fbRead() {
   if (!FB_URL) return null;
   try {
-    const res = await fetch(`${FB_URL}/${FB_PATH}.json`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // 5 second timeout — don't let Firebase hang the whole app
+    const res = await fetchWithTimeout(`${FB_URL}/${FB_PATH}.json`, {}, 5000);
+    if (!res.ok) throw new Error(`Firebase HTTP ${res.status} — check Realtime Database rules`);
     return await res.json() || {};
   } catch(e) {
-    console.warn('Firebase read failed:', e.message);
+    console.warn('Firebase read failed (geocoding will use localStorage only):', e.message);
     return null;
   }
 }
@@ -893,45 +908,46 @@ async function fbRead() {
 async function fbWrite(data) {
   if (!FB_URL) return;
   try {
-    // PATCH merges new keys without overwriting existing ones
-    await fetch(`${FB_URL}/${FB_PATH}.json`, {
+    await fetchWithTimeout(`${FB_URL}/${FB_PATH}.json`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
-    });
+    }, 5000);
   } catch(e) {
     console.warn('Firebase write failed:', e.message);
   }
 }
 
-// ── Load: localStorage instantly, then merge Firebase ────────────────────
+// ── Load: localStorage instantly, Firebase in background (non-blocking) ──
 async function loadGeoCache() {
   if (_geoCacheLoaded) return;
 
-  // 1. Load localStorage immediately (zero latency)
+  // 1. Load localStorage immediately — geocoding can start right away
   _geoCache = lsLoad();
   const localCount = Object.keys(_geoCache).length;
-  if (localCount > 0) console.log(`Geocache: ${localCount} entries from localStorage`);
+  console.log(`Geocache: ${localCount} entries from localStorage`);
 
-  // 2. Merge Firebase on top (has entries from other devices)
+  // Mark as loaded immediately so geocoding isn't blocked by Firebase
+  _geoCacheLoaded = true;
+
+  // 2. Merge Firebase in background — non-blocking
+  // Geocoding proceeds with localStorage while Firebase loads
   if (FB_URL) {
-    const cloud = await fbRead();
-    if (cloud && Object.keys(cloud).length > 0) {
-      // Merge: newer timestamp wins for each key
+    fbRead().then(cloud => {
+      if (!cloud || Object.keys(cloud).length === 0) return;
+      let merged = 0;
       for (const [k, v] of Object.entries(cloud)) {
         if (!_geoCache[k] || (v.ts || 0) > (_geoCache[k].ts || 0)) {
           _geoCache[k] = v;
+          merged++;
         }
       }
-      // Sync merged result back to localStorage
-      lsSave(_geoCache);
-      console.log(`Geocache: merged with Firebase — ${Object.keys(_geoCache).length} total entries`);
-    }
-  } else {
-    console.log('Geocache: No Firebase config — using localStorage only');
+      if (merged > 0) {
+        lsSave(_geoCache);
+        console.log(`Geocache: merged ${merged} entries from Firebase (background)`);
+      }
+    }).catch(e => console.warn('Firebase background merge failed:', e.message));
   }
-
-  _geoCacheLoaded = true;
 }
 
 // ── Save: localStorage + Firebase simultaneously ──────────────────────────
@@ -1026,26 +1042,60 @@ async function enrichStationsWithSuburb(stations) {
   // Load cache (localStorage instant + Firebase merge)
   await loadGeoCache();
 
+  const now = Date.now();
   const newEntries = {};
 
-  // Geocode all in parallel — cached ones resolve instantly
-  await Promise.all(stations.map(async s => {
+  // Split into cached (instant) and uncached (need API call)
+  const cached   = stations.filter(s => {
+    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
+    return _geoCache[key] && (now - (_geoCache[key].ts || 0)) < GEO_TTL_MS;
+  });
+  const uncached = stations.filter(s => {
+    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
+    return !_geoCache[key] || (now - (_geoCache[key].ts || 0)) >= GEO_TTL_MS;
+  });
+
+  // Apply cached immediately — zero latency
+  for (const s of cached) {
     const sLat = parseFloat(s.lat ?? s.center?.lat);
     const sLng = parseFloat(s.lon  ?? s.center?.lon);
     const key  = `${sLat.toFixed(4)},${sLng.toFixed(4)}`;
-    const wasInCache = !!_geoCache[key];
-    const geo  = await reverseGeocode(sLat, sLng);
+    const geo  = _geoCache[key];
+    if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
+  }
+
+  // Stagger uncached requests to avoid rate limiting — 700ms between each
+  for (let i = 0; i < uncached.length; i++) {
+    const s    = uncached[i];
+    const sLat = parseFloat(s.lat ?? s.center?.lat);
+    const sLng = parseFloat(s.lon  ?? s.center?.lon);
+    const key  = `${sLat.toFixed(4)},${sLng.toFixed(4)}`;
+
+    const geo = await reverseGeocodeWithRetry(sLat, sLng);
     if (geo) {
-      s._resolvedSuburb = geo.suburb;
+      s._resolvedSuburb  = geo.suburb;
       s._resolvedAddress = geo.fullAddress;
-      if (!wasInCache) newEntries[key] = geo; // track what's new
+      newEntries[key]    = geo;
     }
-  }));
+
+    // Stagger requests — 700ms gap to respect rate limits
+    if (i < uncached.length - 1) await new Promise(r => setTimeout(r, 700));
+  }
 
   // Save new entries to localStorage + Firebase
   if (_geoDirty) saveGeoCache(newEntries).catch(e => console.warn('Save failed:', e));
 
   return stations;
+}
+
+// Retry wrapper — tries up to 3 times with 1s backoff
+async function reverseGeocodeWithRetry(lat, lng, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    const result = await reverseGeocode(lat, lng);
+    if (result && result.suburb) return result;
+    if (i < attempts - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+  }
+  return null;
 }
 
 // ─── RENDER ───────────────────────────────────────────────────────
