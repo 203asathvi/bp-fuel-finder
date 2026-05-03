@@ -510,6 +510,17 @@
     border-color: #f5a030;
   }
 
+  .btn-gmaps {
+    background: rgba(66,133,244,0.1);
+    border: 1px solid rgba(66,133,244,0.35);
+    color: #7ab3ff;
+  }
+
+  .btn-gmaps:hover {
+    background: rgba(66,133,244,0.2);
+    border-color: #7ab3ff;
+  }
+
   .btn-servosaver {
     background: rgba(0,100,200,0.1);
     border: 1px solid rgba(0,100,200,0.35);
@@ -861,14 +872,15 @@ function renderStations(stations, userLat, userLng, basePrice) {
 
     const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&destination_place_id=&travelmode=driving`;
 
-    // PetrolSpy URL — centred on station coordinates at zoom 15
-    // PetrolSpy uses Leaflet map hash: #map=zoom/lat/lng
-    // Suburb path also included so it loads the right area first, then hash centres it
+    // PetrolSpy — suburb page (best available for VIC community-reported prices)
     const psSuburb = (tags['addr:suburb'] || tags['addr:city'] || '').toLowerCase().trim();
-    const psBase = psSuburb
+    const petrolSpyUrl = psSuburb
       ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(psSuburb)}`
       : `https://petrolspy.com.au/map/location/au/vic`;
-    const petrolSpyUrl = `${psBase}#map=16/${sLat}/${sLng}`;
+
+    // Google Maps search for this exact BP station by name + coordinates
+    // This opens the station's info panel which shows live fuel prices on Android
+    const stationSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${sLat},${sLng},17z`;
 
     const servoSaverUrl = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
 
@@ -904,8 +916,9 @@ function renderStations(stations, userLat, userLng, basePrice) {
         <a class="maps-link" href="${mapsUrl}" target="_blank">🗺 Directions ↗</a>
       </div>
       <div class="live-btn-row">
-        <a class="live-price-btn btn-petrolspy" href="${petrolSpyUrl}" target="_blank">⛽ Live Price — PetrolSpy ↗</a>
-        <a class="live-price-btn btn-servosaver" href="${servoSaverUrl}" target="_blank">🏛 Servo Saver (VIC) ↗</a>
+        <a class="live-price-btn btn-petrolspy" href="${petrolSpyUrl}" target="_blank">⛽ PetrolSpy Prices ↗</a>
+        <a class="live-price-btn btn-gmaps" href="${stationSearchUrl}" target="_blank">📍 Station on Maps ↗</a>
+        <a class="live-price-btn btn-servosaver" href="${servoSaverUrl}" target="_blank">🏛 Servo Saver ↗</a>
       </div>
     `;
     list.appendChild(card);
