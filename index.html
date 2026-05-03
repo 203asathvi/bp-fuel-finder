@@ -861,11 +861,14 @@ function renderStations(stations, userLat, userLng, basePrice) {
 
     const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&destination_place_id=&travelmode=driving`;
 
-    // PetrolSpy live price URL — use suburb if available, else VIC state page
+    // PetrolSpy URL — centred on station coordinates at zoom 15
+    // PetrolSpy uses Leaflet map hash: #map=zoom/lat/lng
+    // Suburb path also included so it loads the right area first, then hash centres it
     const psSuburb = (tags['addr:suburb'] || tags['addr:city'] || '').toLowerCase().trim();
-    const petrolSpyUrl = psSuburb
+    const psBase = psSuburb
       ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(psSuburb)}`
       : `https://petrolspy.com.au/map/location/au/vic`;
+    const petrolSpyUrl = `${psBase}#map=16/${sLat}/${sLng}`;
 
     const servoSaverUrl = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
 
