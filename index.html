@@ -902,6 +902,25 @@ function lsSave(data) {
 }
 
 // ── Firebase REST helpers (no SDK needed — plain fetch) ───────────────────
+// ── Firebase key encoding ────────────────────────────────────────────────────
+// Firebase doesn't allow . , in keys — encode to _ and pipe
+function fbEncodeKey(key) {
+  return key.replace(/\./g, '_').replace(/,/g, '|');
+}
+function fbDecodeKey(key) {
+  return key.replace(/_/g, '.').replace(/\|/g, ',');
+}
+function fbEncodeData(data) {
+  const out = {};
+  for (const [k, v] of Object.entries(data)) out[fbEncodeKey(k)] = v;
+  return out;
+}
+function fbDecodeData(data) {
+  const out = {};
+  for (const [k, v] of Object.entries(data)) out[fbDecodeKey(k)] = v;
+  return out;
+}
+
 // Fetch with timeout helper
 async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
   const controller = new AbortController();
@@ -922,7 +941,8 @@ async function fbRead() {
     // 5 second timeout — don't let Firebase hang the whole app
     const res = await fetchWithTimeout(`${FB_URL}/${FB_PATH}.json`, {}, 5000);
     if (!res.ok) { console.log(`Firebase HTTP ${res.status} — check DB rules`); throw new Error(`Firebase HTTP ${res.status}`); }
-    return await res.json() || {};
+    const raw = await res.json();
+    return raw ? fbDecodeData(raw) : {};
   } catch(e) {
      console.warn(e);
     return null;
@@ -937,7 +957,7 @@ async function fbWrite(data) {
     const res = await fetchWithTimeout(url, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      body: JSON.stringify(fbEncodeData(data)),
     }, 8000);
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
