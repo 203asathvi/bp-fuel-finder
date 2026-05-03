@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BP Fuel Finder</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=Barlow:wght@300;400;500&display=swap" rel="stylesheet">
+<!-- config.js is gitignored — contains Firebase DB URL, never committed to GitHub -->
+<script src="config.js" onerror="console.log('config.js not found — localStorage cache only')"></script>
 <style>
   :root {
     --bp-green: #009b4e;
@@ -846,127 +848,169 @@ async function fetchBPStations(lat, lng, radiusM) {
   return elements;
 }
 
-// ─── GEOCODE CACHE (localStorage — persists across sessions, refreshes daily) ────
-const GEO_STORE_KEY = 'bpff_geocache';
-const GEO_TTL_MS    = 24 * 60 * 60 * 1000; // 24 hours
+// ─── GEOCODE CACHE (Firebase Realtime DB + localStorage fallback) ────────────
+// - localStorage: instant, works offline, per-device
+// - Firebase: syncs across all devices in real time
+// - Strategy: load localStorage first (instant), then merge Firebase on top,
+//   write new entries to both simultaneously
+// - Config loaded from gitignored config.js (never committed to GitHub)
+// - Entries refresh after 24 hours
 
-function loadGeoStore() {
-  try {
-    return JSON.parse(localStorage.getItem(GEO_STORE_KEY) || '{}');
-  } catch(e) { return {}; }
+const GEO_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const LS_KEY     = 'bpff_geocache';
+
+// Firebase config comes from config.js (gitignored)
+// Falls back to localStorage-only if config.js is missing
+const _fbCfg = (typeof window !== 'undefined' && window.BPFF_CONFIG) || {};
+const FB_URL  = _fbCfg.FIREBASE_DB_URL || null; // e.g. 'https://your-app-default-rtdb.firebaseio.com'
+const FB_PATH = 'geocache';
+
+let _geoCache       = {};
+let _geoCacheLoaded = false;
+let _geoDirty       = false;
+
+// ── localStorage helpers ──────────────────────────────────────────────────
+function lsLoad() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch(e) { return {}; }
+}
+function lsSave(data) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch(e) {}
 }
 
-function saveGeoStore(store) {
+// ── Firebase REST helpers (no SDK needed — plain fetch) ───────────────────
+async function fbRead() {
+  if (!FB_URL) return null;
   try {
-    localStorage.setItem(GEO_STORE_KEY, JSON.stringify(store));
-  } catch(e) {
-    console.warn('Could not save geocache to localStorage:', e.message);
-  }
-}
-
-// In-memory cache for current session (avoids repeated localStorage reads)
-const _geoCache = loadGeoStore();
-
-async function reverseGeocode(lat, lng) {
-  const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-  const now = Date.now();
-
-  // Return from cache if fresh (< 24 hours old)
-  if (_geoCache[key] && (now - _geoCache[key].ts) < GEO_TTL_MS) {
-    console.log(`Geocache HIT for ${key} → ${_geoCache[key].data.suburb} (cached ${Math.round((now - _geoCache[key].ts) / 3600000)}h ago)`);
-    return _geoCache[key].data;
-  }
-
-  try {
-    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`;
-    const res = await fetch(url);
+    const res = await fetch(`${FB_URL}/${FB_PATH}.json`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-
-    const suburb   = data.locality || data.city || data.principalSubdivision || '';
-    const postcode = data.postcode || '';
-    const state    = data.principalSubdivision || '';
-
-    const result = {
-      suburb,
-      postcode,
-      state,
-      fullAddress: [suburb, [state, postcode].filter(Boolean).join(' ')]
-        .filter(Boolean).join(', '),
-    };
-
-    // Save to in-memory + localStorage with timestamp
-    _geoCache[key] = { ts: now, data: result };
-    saveGeoStore(_geoCache);
-
-    console.log(`Geocache MISS for ${key} → fetched "${result.suburb}" — saved to localStorage`);
-    return result;
+    return await res.json() || {};
   } catch(e) {
-    console.warn('Reverse geocode failed:', e.message);
-    // Return stale cache if available rather than nothing
-    if (_geoCache[key]) {
-      console.log(`Geocache STALE fallback for ${key}`);
-      return _geoCache[key].data;
-    }
+    console.warn('Firebase read failed:', e.message);
     return null;
   }
 }
 
+async function fbWrite(data) {
+  if (!FB_URL) return;
+  try {
+    // PATCH merges new keys without overwriting existing ones
+    await fetch(`${FB_URL}/${FB_PATH}.json`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch(e) {
+    console.warn('Firebase write failed:', e.message);
+  }
+}
+
+// ── Load: localStorage instantly, then merge Firebase ────────────────────
+async function loadGeoCache() {
+  if (_geoCacheLoaded) return;
+
+  // 1. Load localStorage immediately (zero latency)
+  _geoCache = lsLoad();
+  const localCount = Object.keys(_geoCache).length;
+  if (localCount > 0) console.log(`Geocache: ${localCount} entries from localStorage`);
+
+  // 2. Merge Firebase on top (has entries from other devices)
+  if (FB_URL) {
+    const cloud = await fbRead();
+    if (cloud && Object.keys(cloud).length > 0) {
+      // Merge: newer timestamp wins for each key
+      for (const [k, v] of Object.entries(cloud)) {
+        if (!_geoCache[k] || (v.ts || 0) > (_geoCache[k].ts || 0)) {
+          _geoCache[k] = v;
+        }
+      }
+      // Sync merged result back to localStorage
+      lsSave(_geoCache);
+      console.log(`Geocache: merged with Firebase — ${Object.keys(_geoCache).length} total entries`);
+    }
+  } else {
+    console.log('Geocache: No Firebase config — using localStorage only');
+  }
+
+  _geoCacheLoaded = true;
+}
+
+// ── Save: localStorage + Firebase simultaneously ──────────────────────────
+async function saveGeoCache(newEntries) {
+  if (!_geoDirty) return;
+  lsSave(_geoCache);
+  if (FB_URL && Object.keys(newEntries).length > 0) {
+    await fbWrite(newEntries); // only push new/updated keys — saves bandwidth
+  }
+  _geoDirty = false;
+  console.log(`Geocache: saved ${Object.keys(newEntries).length} new entries`);
+}
+
+// ── Reverse geocode with cache ────────────────────────────────────────────
+async function reverseGeocode(lat, lng) {
+  const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const now = Date.now();
+
+  // Return cached entry if fresh
+  if (_geoCache[key] && (now - (_geoCache[key].ts || 0)) < GEO_TTL_MS) {
+    console.log(`Geocache HIT: ${key} → "${_geoCache[key].suburb}"`);
+    return _geoCache[key];
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const result = {
+      suburb:      data.locality || data.city || data.principalSubdivision || '',
+      postcode:    data.postcode || '',
+      state:       data.principalSubdivision || '',
+      fullAddress: [
+        data.locality || data.city || '',
+        [data.principalSubdivision, data.postcode].filter(Boolean).join(' ')
+      ].filter(Boolean).join(', '),
+      ts: now,
+    };
+
+    _geoCache[key] = result;
+    _geoDirty = true;
+    console.log(`Geocache MISS: ${key} → fetched "${result.suburb}"`);
+    return result;
+  } catch(e) {
+    console.warn('Reverse geocode failed:', e.message);
+    return _geoCache[key] || null; // stale fallback
+  }
+}
+
+// ── Enrich stations with suburb + address ────────────────────────────────
 async function enrichStationsWithSuburb(stations) {
   if (stations.length === 0) return stations;
 
-  // Split into cached (instant) and uncached (needs API call)
-  const cached   = stations.filter(s => {
-    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
-    const entry = _geoCache[key];
-    return entry && (Date.now() - entry.ts) < GEO_TTL_MS;
-  });
-  const uncached = stations.filter(s => {
-    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
-    const entry = _geoCache[key];
-    return !entry || (Date.now() - entry.ts) >= GEO_TTL_MS;
-  });
+  // Load cache (localStorage instant + Firebase merge)
+  await loadGeoCache();
 
-  console.log(`Geocode: ${cached.length} cached, ${uncached.length} need fresh lookup`);
+  const newEntries = {};
 
-  // Apply cached results immediately
-  for (const s of cached) {
+  // Geocode all in parallel — cached ones resolve instantly
+  await Promise.all(stations.map(async s => {
     const sLat = parseFloat(s.lat ?? s.center?.lat);
     const sLng = parseFloat(s.lon  ?? s.center?.lon);
-    const geo  = await reverseGeocode(sLat, sLng); // instant — hits memory cache
-    if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
-  }
-
-  // Fetch uncached in parallel (BigDataCloud allows small bursts)
-  if (uncached.length > 0) {
-    if (uncached.length <= 5) {
-      await Promise.all(uncached.map(async s => {
-        const sLat = parseFloat(s.lat ?? s.center?.lat);
-        const sLng = parseFloat(s.lon  ?? s.center?.lon);
-        const geo  = await reverseGeocode(sLat, sLng);
-        if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
-      }));
-    } else {
-      // Larger sets — stagger to be polite to the API
-      for (let i = 0; i < uncached.length; i++) {
-        const s    = uncached[i];
-        const sLat = parseFloat(s.lat ?? s.center?.lat);
-        const sLng = parseFloat(s.lon  ?? s.center?.lon);
-        const geo  = await reverseGeocode(sLat, sLng);
-        if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
-        if (i < uncached.length - 1) await new Promise(r => setTimeout(r, 600));
-      }
+    const key  = `${sLat.toFixed(4)},${sLng.toFixed(4)}`;
+    const wasInCache = !!_geoCache[key];
+    const geo  = await reverseGeocode(sLat, sLng);
+    if (geo) {
+      s._resolvedSuburb = geo.suburb;
+      s._resolvedAddress = geo.fullAddress;
+      if (!wasInCache) newEntries[key] = geo; // track what's new
     }
-  }
+  }));
+
+  // Save new entries to localStorage + Firebase
+  if (_geoDirty) saveGeoCache(newEntries).catch(e => console.warn('Save failed:', e));
 
   return stations;
-}
-
-// Utility: clear geocache manually (can call from console: clearGeoCache())
-function clearGeoCache() {
-  Object.keys(_geoCache).forEach(k => delete _geoCache[k]);
-  localStorage.removeItem(GEO_STORE_KEY);
-  console.log('Geocache cleared');
 }
 
 // ─── RENDER ───────────────────────────────────────────────────────
