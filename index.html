@@ -602,38 +602,55 @@ function detectFuels(tags) {
 }
 
 // ─── NATIONAL PRICES ─────────────────────────────────────────────
+// Fallback: recent AU average prices (AUD/L) used when API is unavailable
+const FALLBACK_PRICES = { gasoline_liter_aud: 1.89, diesel_liter_aud: 1.95, lpg_liter_aud: 0.98 };
+
 async function fetchNationalPrices() {
+  let au = null;
+  let usedFallback = false;
+
   try {
     const res = await fetch('https://openvan.camp/api/fuel/prices?source=bp-fuel-finder');
-    if (!res.ok) return null;
-    const data = await res.json();
-    const au = data?.data?.AU;
-    if (!au) return null;
-
-    document.getElementById('nationalSection').style.display = 'block';
-    const cont = document.getElementById('nationalPrices');
-    cont.innerHTML = '';
-
-    [
-      { label: 'Gasoline', val: au.gasoline_liter_aud },
-      { label: 'Diesel',   val: au.diesel_liter_aud },
-      { label: 'LPG',      val: au.lpg_liter_aud },
-    ].forEach(({ label, val }) => {
-      if (!val) return;
-      const chip = document.createElement('div');
-      chip.className = 'price-chip';
-      chip.innerHTML = `
-        <span class="chip-label">${label}</span>
-        <span class="chip-value">${(val * 100).toFixed(1)}<span class="chip-unit">¢/L</span></span>
-      `;
-      cont.appendChild(chip);
-    });
-
-    return au;
+    if (res.ok) {
+      const data = await res.json();
+      au = data?.data?.AU || null;
+    }
   } catch(e) {
-    console.warn('National prices unavailable', e);
-    return null;
+    console.warn('National prices API unavailable, using fallback', e);
   }
+
+  if (!au) { au = FALLBACK_PRICES; usedFallback = true; }
+
+  document.getElementById('nationalSection').style.display = 'block';
+  const cont = document.getElementById('nationalPrices');
+  cont.innerHTML = '';
+
+  [
+    { label: 'Gasoline', val: au.gasoline_liter_aud },
+    { label: 'Diesel',   val: au.diesel_liter_aud },
+    { label: 'LPG',      val: au.lpg_liter_aud },
+  ].forEach(({ label, val }) => {
+    if (!val) return;
+    const chip = document.createElement('div');
+    chip.className = 'price-chip';
+    chip.innerHTML = `<span class="chip-label">${label}</span><span class="chip-value">${(val * 100).toFixed(1)}<span class="chip-unit">¢/L</span></span>`;
+    cont.appendChild(chip);
+  });
+
+  if (usedFallback) {
+    const notice = document.createElement('div');
+    notice.style.cssText = 'width:100%;font-size:11px;color:var(--bp-muted);margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;';
+    notice.innerHTML = `<span>⚠️ Using cached prices — live data unavailable</span><button onclick="retryPrices()" style="font-family:'Barlow Condensed',sans-serif;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:rgba(0,155,78,0.15);border:1px solid rgba(0,155,78,0.4);color:#7ddfaa;padding:4px 12px;border-radius:6px;cursor:pointer;white-space:nowrap;">↻ Retry</button>`;
+    cont.appendChild(notice);
+  }
+
+  return au;
+}
+
+async function retryPrices() {
+  const cont = document.getElementById('nationalPrices');
+  cont.innerHTML = '<span style="font-size:12px;color:var(--bp-muted);">Refreshing prices…</span>';
+  await fetchNationalPrices();
 }
 
 // ─── OVERPASS QUERY ───────────────────────────────────────────────
@@ -699,7 +716,7 @@ function renderStations(stations, userLat, userLng, basePrice) {
     const fuels       = detectFuels(tags);
     const fuelTagsHtml = fuels.map(f => `<span class="fuel-tag ${f.cls}">${f.label}</span>`).join('');
 
-    const mapsUrl = `https://www.openstreetmap.org/?mlat=${sLat}&mlon=${sLng}&zoom=17`;
+    const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&destination_place_id=&travelmode=driving`;
 
     let priceHtml = '—';
     if (basePrice) {
@@ -731,7 +748,7 @@ function renderStations(stations, userLat, userLng, basePrice) {
           <span class="best-price-label">Est. low price:</span>
           <span class="best-price">${priceHtml}</span>
         </div>
-        <a class="maps-link" href="${mapsUrl}" target="_blank">View on Map ↗</a>
+        <a class="maps-link" href="${mapsUrl}" target="_blank">🗺 Google Maps ↗</a>
       </div>
     `;
     list.appendChild(card);
