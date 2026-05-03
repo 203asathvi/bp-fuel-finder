@@ -910,14 +910,20 @@ function renderStations(stations, userLat, userLng, basePrice) {
 
   stations.forEach((s, idx) => {
     const tags = s.tags || {};
-    const sLat = s.lat ?? s.center?.lat;
-    const sLng = s.lon  ?? s.center?.lon;
+
+    // Guard: nodes have lat/lon directly, ways have center.lat/center.lon
+    const sLat = parseFloat(s.lat ?? s.center?.lat);
+    const sLng = parseFloat(s.lon  ?? s.center?.lon);
+
+    // Skip if coordinates are invalid
+    if (isNaN(sLat) || isNaN(sLng)) return;
+
     const dist = calcDist(userLat, userLng, sLat, sLng).toFixed(1);
 
     const name    = tags.name || tags.brand || tags.operator || 'BP Service Station';
     const street  = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
-    const suburb  = tags['addr:suburb'] || tags['addr:city'] || '';
-    const address = [street, suburb].filter(Boolean).join(', ') || 'Address not listed';
+    const osmSuburb = tags['addr:suburb'] || tags['addr:city'] || '';
+    const address = [street, osmSuburb].filter(Boolean).join(', ') || 'Address not listed';
 
     const hours    = tags['opening_hours'] || '';
     const is24h    = hours === '24/7';
@@ -926,19 +932,16 @@ function renderStations(stations, userLat, userLng, basePrice) {
     const fuels       = detectFuels(tags);
     const fuelTagsHtml = fuels.map(f => `<span class="fuel-tag ${f.cls}">${f.label}</span>`).join('');
 
-    const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&destination_place_id=&travelmode=driving`;
+    // Use OSM suburb tag first, then Nominatim resolved suburb, then fall back
+    const resolvedSuburb = (osmSuburb || s._resolvedSuburb || '').toLowerCase().trim();
 
-    // PetrolSpy — use OSM suburb tag, or Nominatim reverse-geocoded suburb, or VIC state
-    const psSuburb = (tags['addr:suburb'] || tags['addr:city'] || s._resolvedSuburb || '').toLowerCase().trim();
-    const petrolSpyUrl = psSuburb
-      ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(psSuburb)}`
-      : `https://petrolspy.com.au/map/location/au/vic`;
-
-    // Google Maps search for this exact BP station by name + coordinates
-    // This opens the station's info panel which shows live fuel prices on Android
+    // Build all URLs with confirmed coordinates
+    const mapsUrl        = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&travelmode=driving`;
     const stationSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${sLat},${sLng},17z`;
-
-    const servoSaverUrl = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
+    const petrolSpyUrl   = resolvedSuburb
+      ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(resolvedSuburb)}`
+      : `https://petrolspy.com.au/map/location/au/vic`;
+    const servoSaverUrl  = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
 
     let priceHtml = '—';
     if (basePrice) {
@@ -946,9 +949,12 @@ function renderStations(stations, userLat, userLng, basePrice) {
       priceHtml = `${cents}¢/L`;
     }
 
+    // Build card using DOM methods so URLs are never corrupted by template literal escaping
     const card = document.createElement('div');
     card.className = 'station-card';
     card.style.animationDelay = `${Math.min(idx * 0.055, 0.6)}s`;
+
+    // Use innerHTML only for non-URL content, set href via JS properties
     card.innerHTML = `
       <div class="station-top">
         <div class="station-rank">${idx + 1}</div>
@@ -957,10 +963,7 @@ function renderStations(stations, userLat, userLng, basePrice) {
           <div class="station-address" title="${address}">${address}</div>
           ${hours ? `<div class="station-hours" style="color:${hoursClr}">⏱ ${is24h ? '24 / 7' : hours}</div>` : ''}
         </div>
-        <div class="station-distance">
-          ${dist} km
-          <small>from you</small>
-        </div>
+        <div class="station-distance">${dist} km<small>from you</small></div>
       </div>
       <div class="fuel-tags">${fuelTagsHtml}</div>
       <div class="station-divider"></div>
@@ -969,14 +972,21 @@ function renderStations(stations, userLat, userLng, basePrice) {
           <span class="best-price-label">Est. low price:</span>
           <span class="best-price">${priceHtml}</span>
         </div>
-        <a class="maps-link" href="${mapsUrl}" target="_blank">🗺 Directions ↗</a>
+        <a class="maps-link" id="dir-${idx}" target="_blank">🗺 Directions ↗</a>
       </div>
       <div class="live-btn-row">
-        <a class="live-price-btn btn-petrolspy" href="${petrolSpyUrl}" target="_blank">⛽ PetrolSpy Prices ↗</a>
-        <a class="live-price-btn btn-gmaps" href="${stationSearchUrl}" target="_blank">📍 Station on Maps ↗</a>
-        <a class="live-price-btn btn-servosaver" href="${servoSaverUrl}" target="_blank">🏛 Servo Saver ↗</a>
+        <a class="live-price-btn btn-petrolspy" id="ps-${idx}" target="_blank">⛽ PetrolSpy Prices ↗</a>
+        <a class="live-price-btn btn-gmaps"     id="gm-${idx}" target="_blank">📍 Station on Maps ↗</a>
+        <a class="live-price-btn btn-servosaver" id="sv-${idx}" target="_blank">🏛 Servo Saver ↗</a>
       </div>
     `;
+
+    // Set hrefs via DOM property — guaranteed correct, no escaping issues
+    card.querySelector(`#dir-${idx}`).href = mapsUrl;
+    card.querySelector(`#ps-${idx}`).href  = petrolSpyUrl;
+    card.querySelector(`#gm-${idx}`).href  = stationSearchUrl;
+    card.querySelector(`#sv-${idx}`).href  = servoSaverUrl;
+
     list.appendChild(card);
   });
 }
