@@ -440,6 +440,52 @@
     background: rgba(0,155,78,0.15);
     border-color: var(--bp-green);
   }
+  .live-btn-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+
+  .live-price-btn {
+    font-size: 11px;
+    font-family: 'Barlow Condensed', sans-serif;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    white-space: nowrap;
+    transition: all 0.18s;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .btn-petrolspy {
+    background: rgba(245,140,0,0.1);
+    border: 1px solid rgba(245,140,0,0.4);
+    color: #f5a030;
+  }
+
+  .btn-petrolspy:hover {
+    background: rgba(245,140,0,0.2);
+    border-color: #f5a030;
+  }
+
+  .btn-servosaver {
+    background: rgba(0,100,200,0.1);
+    border: 1px solid rgba(0,100,200,0.35);
+    color: #6aabff;
+  }
+
+  .btn-servosaver:hover {
+    background: rgba(0,100,200,0.2);
+    border-color: #6aabff;
+  }
+
+
 
   .empty-state {
     text-align: center;
@@ -718,9 +764,16 @@ function renderStations(stations, userLat, userLng, basePrice) {
 
     const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&destination_place_id=&travelmode=driving`;
 
+    // PetrolSpy live price URL — use suburb if available, else VIC state page
+    const psSuburb = (tags['addr:suburb'] || tags['addr:city'] || '').toLowerCase().trim();
+    const petrolSpyUrl = psSuburb
+      ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(psSuburb)}`
+      : `https://petrolspy.com.au/map/location/au/vic`;
+
+    const servoSaverUrl = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
+
     let priceHtml = '—';
     if (basePrice) {
-      // national avg (AUD/L) → cents + typical retail margin 15–20c + small variation
       const cents = (basePrice * 100 + 17 + (Math.random() * 6 - 3)).toFixed(1);
       priceHtml = `${cents}¢/L`;
     }
@@ -748,7 +801,11 @@ function renderStations(stations, userLat, userLng, basePrice) {
           <span class="best-price-label">Est. low price:</span>
           <span class="best-price">${priceHtml}</span>
         </div>
-        <a class="maps-link" href="${mapsUrl}" target="_blank">🗺 Google Maps ↗</a>
+        <a class="maps-link" href="${mapsUrl}" target="_blank">🗺 Directions ↗</a>
+      </div>
+      <div class="live-btn-row">
+        <a class="live-price-btn btn-petrolspy" href="${petrolSpyUrl}" target="_blank">⛽ Live Price — PetrolSpy ↗</a>
+        <a class="live-price-btn btn-servosaver" href="${servoSaverUrl}" target="_blank">🏛 Servo Saver (VIC) ↗</a>
       </div>
     `;
     list.appendChild(card);
