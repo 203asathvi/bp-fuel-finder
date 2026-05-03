@@ -1379,7 +1379,10 @@ function renderStations(stations, userLat, userLng, basePrice) {
     // PetrolSpy — open directly at station coordinates using their latlng URL format
     const psBtn = card.querySelector(`#ps-${idx}`);
     psBtn.addEventListener('click', () => {
-      window.open(`https://petrolspy.com.au/map/latlng/${sLat}/${sLng}`, '_blank');
+      // Use full OSM coordinate precision for exact PetrolSpy location
+      const psLat = (s.lat ?? s.center?.lat);
+      const psLng = (s.lon  ?? s.center?.lon);
+      window.open(`https://petrolspy.com.au/map/latlng/${psLat}/${psLng}`, '_blank');
     });
 
     list.appendChild(card);
