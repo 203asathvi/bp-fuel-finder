@@ -497,6 +497,15 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    cursor: pointer;
+    /* Reset <button> default styles */
+    background: none;
+    outline: none;
+    font-size: 11px;
+  }
+  .live-price-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
   }
 
   .btn-petrolspy {
@@ -945,16 +954,10 @@ function renderStations(stations, userLat, userLng, basePrice) {
     const fuels       = detectFuels(tags);
     const fuelTagsHtml = fuels.map(f => `<span class="fuel-tag ${f.cls}">${f.label}</span>`).join('');
 
-    // Use OSM suburb tag first, then Nominatim resolved suburb, then fall back
-    const resolvedSuburb = (osmSuburb || s._resolvedSuburb || '').toLowerCase().trim();
-
-    // Build all URLs with confirmed coordinates
-    const mapsUrl        = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&travelmode=driving`;
+    // Build all static URLs
+    const mapsUrl          = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&travelmode=driving`;
     const stationSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${sLat},${sLng},17z`;
-    const petrolSpyUrl   = resolvedSuburb
-      ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(resolvedSuburb)}`
-      : `https://petrolspy.com.au/map/location/au/vic`;
-    const servoSaverUrl  = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
+    const servoSaverUrl    = `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
 
     let priceHtml = '—';
     if (basePrice) {
@@ -962,12 +965,10 @@ function renderStations(stations, userLat, userLng, basePrice) {
       priceHtml = `${cents}¢/L`;
     }
 
-    // Build card using DOM methods so URLs are never corrupted by template literal escaping
     const card = document.createElement('div');
     card.className = 'station-card';
     card.style.animationDelay = `${Math.min(idx * 0.055, 0.6)}s`;
 
-    // Use innerHTML only for non-URL content, set href via JS properties
     card.innerHTML = `
       <div class="station-top">
         <div class="station-rank">${idx + 1}</div>
@@ -988,17 +989,41 @@ function renderStations(stations, userLat, userLng, basePrice) {
         <a class="maps-link" id="dir-${idx}" target="_blank">🗺 Directions ↗</a>
       </div>
       <div class="live-btn-row">
-        <a class="live-price-btn btn-petrolspy" id="ps-${idx}" target="_blank">⛽ PetrolSpy Prices ↗</a>
-        <a class="live-price-btn btn-gmaps"     id="gm-${idx}" target="_blank">📍 Station on Maps ↗</a>
+        <button class="live-price-btn btn-petrolspy" id="ps-${idx}">⛽ PetrolSpy Prices ↗</button>
+        <a class="live-price-btn btn-gmaps" id="gm-${idx}" target="_blank">📍 Station on Maps ↗</a>
         <a class="live-price-btn btn-servosaver" id="sv-${idx}" target="_blank">🏛 Servo Saver ↗</a>
       </div>
     `;
 
-    // Set hrefs via DOM property — guaranteed correct, no escaping issues
+    // Static links — set href directly
     card.querySelector(`#dir-${idx}`).href = mapsUrl;
-    card.querySelector(`#ps-${idx}`).href  = petrolSpyUrl;
     card.querySelector(`#gm-${idx}`).href  = stationSearchUrl;
     card.querySelector(`#sv-${idx}`).href  = servoSaverUrl;
+
+    // PetrolSpy — geocode at click time using exact station coordinates
+    // This guarantees the correct suburb regardless of OSM data quality
+    const psBtn = card.querySelector(`#ps-${idx}`);
+    psBtn.addEventListener('click', async () => {
+      // Show loading state on button
+      const original = psBtn.textContent;
+      psBtn.textContent = '⏳ Looking up suburb…';
+      psBtn.disabled = true;
+
+      try {
+        // Always geocode fresh from the station's actual coordinates
+        const geo = await reverseGeocode(sLat, sLng);
+        const suburb = (geo?.suburb || osmSuburb || '').toLowerCase().trim();
+        const url = suburb
+          ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(suburb)}`
+          : `https://petrolspy.com.au/map/location/au/vic`;
+        window.open(url, '_blank');
+      } catch(e) {
+        window.open('https://petrolspy.com.au/map/location/au/vic', '_blank');
+      } finally {
+        psBtn.textContent = original;
+        psBtn.disabled = false;
+      }
+    });
 
     list.appendChild(card);
   });
