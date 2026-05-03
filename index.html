@@ -861,21 +861,34 @@ async function reverseGeocode(lat, lng) {
 }
 
 async function enrichStationsWithSuburb(stations) {
-  // Batch reverse geocode only stations missing OSM suburb tag
-  // Nominatim rate limit: 1 req/sec — we stagger requests
+  // Only geocode stations that don't already have a suburb tag in OSM
   const todo = stations.filter(s => {
     const t = s.tags || {};
     return !t['addr:suburb'] && !t['addr:city'];
   });
 
-  for (let i = 0; i < todo.length; i++) {
-    const s = todo[i];
-    const sLat = s.lat ?? s.center?.lat;
-    const sLng = s.lon  ?? s.center?.lon;
-    const suburb = await reverseGeocode(sLat, sLng);
-    if (suburb) s._resolvedSuburb = suburb;
-    // 1.1s delay between calls to respect Nominatim rate limit
-    if (i < todo.length - 1) await new Promise(r => setTimeout(r, 1100));
+  if (todo.length === 0) return stations;
+
+  // Run all reverse geocodes in parallel — Nominatim allows bursts for small sets
+  // For larger sets stagger at 1.1s each to respect 1 req/sec policy
+  if (todo.length <= 3) {
+    // Small set — parallel is fine
+    await Promise.all(todo.map(async s => {
+      const sLat = s.lat ?? s.center?.lat;
+      const sLng = s.lon  ?? s.center?.lon;
+      const suburb = await reverseGeocode(sLat, sLng);
+      if (suburb) s._resolvedSuburb = suburb;
+    }));
+  } else {
+    // Larger set — stagger to respect rate limit
+    for (let i = 0; i < todo.length; i++) {
+      const s = todo[i];
+      const sLat = s.lat ?? s.center?.lat;
+      const sLng = s.lon  ?? s.center?.lon;
+      const suburb = await reverseGeocode(sLat, sLng);
+      if (suburb) s._resolvedSuburb = suburb;
+      if (i < todo.length - 1) await new Promise(r => setTimeout(r, 1100));
+    }
   }
   return stations;
 }
@@ -1027,21 +1040,18 @@ async function scanStations() {
       .sort((a, b) => a._dist - b._dist);
 
     setProgress(100);
+
+    // Resolve suburb names via Nominatim BEFORE rendering so PetrolSpy links are correct
+    if (stations.length > 0) {
+      setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}. Resolving suburbs…`, 'loading');
+      await enrichStationsWithSuburb(stations);
+    }
+
     setStatus(
-      `✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}. Looking up suburbs…`,
+      `✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`,
       'done'
     );
-
-    // Reverse geocode stations missing suburb tags (in background, re-render when done)
-    renderStations(stations, userLat, userLng, basePrice);  // render immediately with what we have
-    enrichStationsWithSuburb(stations).then(() => {
-      // Re-render with resolved suburbs — PetrolSpy links now have correct suburb names
-      renderStations(stations, userLat, userLng, basePrice);
-      setStatus(
-        `✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`,
-        'done'
-      );
-    });
+    renderStations(stations, userLat, userLng, basePrice);
 
   } catch(err) {
     setProgress(0);
