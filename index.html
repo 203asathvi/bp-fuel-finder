@@ -844,48 +844,39 @@ async function reverseGeocode(lat, lng) {
   const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
   if (_geoCache[key]) return _geoCache[key];
   try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=18&addressdetails=1`,
-      { headers: { 'Accept-Language': 'en', 'User-Agent': 'BPFuelFinder/1.0' } }
-    );
-    if (!res.ok) return null;
+    // BigDataCloud: free, no API key, CORS-enabled, browser-only, Australia suburb+postcode level
+    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const addr = data.address || {};
 
-    // Build full address from Nominatim response
-    const houseNumber = addr.house_number || '';
-    const road        = addr.road || addr.pedestrian || addr.footway || '';
-    const suburb      = addr.suburb || addr.neighbourhood || addr.town || addr.city_district || addr.village || addr.city || '';
-    const state       = addr.state || '';
-    const postcode    = addr.postcode || '';
+    // BigDataCloud response fields
+    const suburb   = data.locality || data.city || data.principalSubdivision || '';
+    const postcode = data.postcode || '';
+    const road     = data.localityInfo?.administrative?.[3]?.name || '';
+    const state    = data.principalSubdivision || '';
 
     const result = {
       suburb,
-      houseNumber,
-      road,
-      state,
       postcode,
-      // Full display string e.g. "144 Point Cook Rd, Seabrook VIC 3028"
-      fullAddress: [
-        [houseNumber, road].filter(Boolean).join(' '),
-        suburb,
-        [state, postcode].filter(Boolean).join(' ')
-      ].filter(Boolean).join(', '),
+      state,
+      fullAddress: [suburb, [state, postcode].filter(Boolean).join(' ')]
+        .filter(Boolean).join(', '),
     };
 
+    console.log(`Geocoded ${lat},${lng} → ${result.suburb} (${result.fullAddress})`);
     _geoCache[key] = result;
     return result;
   } catch(e) {
+    console.warn('Reverse geocode failed:', e.message);
     return null;
   }
 }
 
 async function enrichStationsWithSuburb(stations) {
-  // Only geocode stations that don't already have a suburb tag in OSM
-  const todo = stations.filter(s => {
-    const t = s.tags || {};
-    return !t['addr:suburb'] && !t['addr:city'];
-  });
+  // Geocode ALL stations — we always want the best suburb for PetrolSpy
+  // even if OSM has some address data (OSM suburb names often differ from PetrolSpy's)
+  const todo = stations;
 
   if (todo.length === 0) return stations;
 
