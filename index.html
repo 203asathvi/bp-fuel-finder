@@ -845,16 +845,36 @@ async function reverseGeocode(lat, lng) {
   if (_geoCache[key]) return _geoCache[key];
   try {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=16&addressdetails=1`,
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=18&addressdetails=1`,
       { headers: { 'Accept-Language': 'en', 'User-Agent': 'BPFuelFinder/1.0' } }
     );
     if (!res.ok) return null;
     const data = await res.json();
     const addr = data.address || {};
-    // Prefer suburb > town > city_district > village > city
-    const suburb = addr.suburb || addr.town || addr.city_district || addr.village || addr.city || null;
-    _geoCache[key] = suburb;
-    return suburb;
+
+    // Build full address from Nominatim response
+    const houseNumber = addr.house_number || '';
+    const road        = addr.road || addr.pedestrian || addr.footway || '';
+    const suburb      = addr.suburb || addr.neighbourhood || addr.town || addr.city_district || addr.village || addr.city || '';
+    const state       = addr.state || '';
+    const postcode    = addr.postcode || '';
+
+    const result = {
+      suburb,
+      houseNumber,
+      road,
+      state,
+      postcode,
+      // Full display string e.g. "144 Point Cook Rd, Seabrook VIC 3028"
+      fullAddress: [
+        [houseNumber, road].filter(Boolean).join(' '),
+        suburb,
+        [state, postcode].filter(Boolean).join(' ')
+      ].filter(Boolean).join(', '),
+    };
+
+    _geoCache[key] = result;
+    return result;
   } catch(e) {
     return null;
   }
@@ -876,8 +896,8 @@ async function enrichStationsWithSuburb(stations) {
     await Promise.all(todo.map(async s => {
       const sLat = s.lat ?? s.center?.lat;
       const sLng = s.lon  ?? s.center?.lon;
-      const suburb = await reverseGeocode(sLat, sLng);
-      if (suburb) s._resolvedSuburb = suburb;
+      const geo = await reverseGeocode(sLat, sLng);
+      if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
     }));
   } else {
     // Larger set — stagger to respect rate limit
@@ -885,8 +905,8 @@ async function enrichStationsWithSuburb(stations) {
       const s = todo[i];
       const sLat = s.lat ?? s.center?.lat;
       const sLng = s.lon  ?? s.center?.lon;
-      const suburb = await reverseGeocode(sLat, sLng);
-      if (suburb) s._resolvedSuburb = suburb;
+      const geo = await reverseGeocode(sLat, sLng);
+      if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
       if (i < todo.length - 1) await new Promise(r => setTimeout(r, 1100));
     }
   }
@@ -921,9 +941,11 @@ function renderStations(stations, userLat, userLng, basePrice) {
     const dist = calcDist(userLat, userLng, sLat, sLng).toFixed(1);
 
     const name    = tags.name || tags.brand || tags.operator || 'BP Service Station';
-    const street  = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
+    const street    = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
     const osmSuburb = tags['addr:suburb'] || tags['addr:city'] || '';
-    const address = [street, osmSuburb].filter(Boolean).join(', ') || 'Address not listed';
+    const osmAddr   = [street, osmSuburb].filter(Boolean).join(', ');
+    // Fall back to Nominatim-resolved full address if OSM has no address data
+    const address   = osmAddr || s._resolvedAddress || 'Address not listed';
 
     const hours    = tags['opening_hours'] || '';
     const is24h    = hours === '24/7';
