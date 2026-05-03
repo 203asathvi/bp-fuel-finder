@@ -846,23 +846,45 @@ async function fetchBPStations(lat, lng, radiusM) {
   return elements;
 }
 
-// ─── REVERSE GEOCODE (Nominatim) ─────────────────────────────────
-const _geoCache = {};
+// ─── GEOCODE CACHE (localStorage — persists across sessions, refreshes daily) ────
+const GEO_STORE_KEY = 'bpff_geocache';
+const GEO_TTL_MS    = 24 * 60 * 60 * 1000; // 24 hours
+
+function loadGeoStore() {
+  try {
+    return JSON.parse(localStorage.getItem(GEO_STORE_KEY) || '{}');
+  } catch(e) { return {}; }
+}
+
+function saveGeoStore(store) {
+  try {
+    localStorage.setItem(GEO_STORE_KEY, JSON.stringify(store));
+  } catch(e) {
+    console.warn('Could not save geocache to localStorage:', e.message);
+  }
+}
+
+// In-memory cache for current session (avoids repeated localStorage reads)
+const _geoCache = loadGeoStore();
 
 async function reverseGeocode(lat, lng) {
   const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-  if (_geoCache[key]) return _geoCache[key];
+  const now = Date.now();
+
+  // Return from cache if fresh (< 24 hours old)
+  if (_geoCache[key] && (now - _geoCache[key].ts) < GEO_TTL_MS) {
+    console.log(`Geocache HIT for ${key} → ${_geoCache[key].data.suburb} (cached ${Math.round((now - _geoCache[key].ts) / 3600000)}h ago)`);
+    return _geoCache[key].data;
+  }
+
   try {
-    // BigDataCloud: free, no API key, CORS-enabled, browser-only, Australia suburb+postcode level
     const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
-    // BigDataCloud response fields
     const suburb   = data.locality || data.city || data.principalSubdivision || '';
     const postcode = data.postcode || '';
-    const road     = data.localityInfo?.administrative?.[3]?.name || '';
     const state    = data.principalSubdivision || '';
 
     const result = {
@@ -873,44 +895,78 @@ async function reverseGeocode(lat, lng) {
         .filter(Boolean).join(', '),
     };
 
-    console.log(`Geocoded ${lat},${lng} → ${result.suburb} (${result.fullAddress})`);
-    _geoCache[key] = result;
+    // Save to in-memory + localStorage with timestamp
+    _geoCache[key] = { ts: now, data: result };
+    saveGeoStore(_geoCache);
+
+    console.log(`Geocache MISS for ${key} → fetched "${result.suburb}" — saved to localStorage`);
     return result;
   } catch(e) {
     console.warn('Reverse geocode failed:', e.message);
+    // Return stale cache if available rather than nothing
+    if (_geoCache[key]) {
+      console.log(`Geocache STALE fallback for ${key}`);
+      return _geoCache[key].data;
+    }
     return null;
   }
 }
 
 async function enrichStationsWithSuburb(stations) {
-  // Geocode ALL stations — we always want the best suburb for PetrolSpy
-  // even if OSM has some address data (OSM suburb names often differ from PetrolSpy's)
-  const todo = stations;
+  if (stations.length === 0) return stations;
 
-  if (todo.length === 0) return stations;
+  // Split into cached (instant) and uncached (needs API call)
+  const cached   = stations.filter(s => {
+    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
+    const entry = _geoCache[key];
+    return entry && (Date.now() - entry.ts) < GEO_TTL_MS;
+  });
+  const uncached = stations.filter(s => {
+    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
+    const entry = _geoCache[key];
+    return !entry || (Date.now() - entry.ts) >= GEO_TTL_MS;
+  });
 
-  // Run all reverse geocodes in parallel — Nominatim allows bursts for small sets
-  // For larger sets stagger at 1.1s each to respect 1 req/sec policy
-  if (todo.length <= 3) {
-    // Small set — parallel is fine
-    await Promise.all(todo.map(async s => {
-      const sLat = s.lat ?? s.center?.lat;
-      const sLng = s.lon  ?? s.center?.lon;
-      const geo = await reverseGeocode(sLat, sLng);
-      if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
-    }));
-  } else {
-    // Larger set — stagger to respect rate limit
-    for (let i = 0; i < todo.length; i++) {
-      const s = todo[i];
-      const sLat = s.lat ?? s.center?.lat;
-      const sLng = s.lon  ?? s.center?.lon;
-      const geo = await reverseGeocode(sLat, sLng);
-      if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
-      if (i < todo.length - 1) await new Promise(r => setTimeout(r, 1100));
+  console.log(`Geocode: ${cached.length} cached, ${uncached.length} need fresh lookup`);
+
+  // Apply cached results immediately
+  for (const s of cached) {
+    const sLat = parseFloat(s.lat ?? s.center?.lat);
+    const sLng = parseFloat(s.lon  ?? s.center?.lon);
+    const geo  = await reverseGeocode(sLat, sLng); // instant — hits memory cache
+    if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
+  }
+
+  // Fetch uncached in parallel (BigDataCloud allows small bursts)
+  if (uncached.length > 0) {
+    if (uncached.length <= 5) {
+      await Promise.all(uncached.map(async s => {
+        const sLat = parseFloat(s.lat ?? s.center?.lat);
+        const sLng = parseFloat(s.lon  ?? s.center?.lon);
+        const geo  = await reverseGeocode(sLat, sLng);
+        if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
+      }));
+    } else {
+      // Larger sets — stagger to be polite to the API
+      for (let i = 0; i < uncached.length; i++) {
+        const s    = uncached[i];
+        const sLat = parseFloat(s.lat ?? s.center?.lat);
+        const sLng = parseFloat(s.lon  ?? s.center?.lon);
+        const geo  = await reverseGeocode(sLat, sLng);
+        if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
+        if (i < uncached.length - 1) await new Promise(r => setTimeout(r, 600));
+      }
     }
   }
+
   return stations;
+}
+
+// Utility: clear geocache manually (can call from console: clearGeoCache())
+function clearGeoCache() {
+  Object.keys(_geoCache).forEach(k => delete _geoCache[k]);
+  localStorage.removeItem(GEO_STORE_KEY);
+  console.log('Geocache cleared');
 }
 
 // ─── RENDER ───────────────────────────────────────────────────────
