@@ -198,6 +198,42 @@
   .status-dot.error  { background: var(--red); animation: none; }
   .status-dot.done   { background: var(--bp-green); animation: none; }
 
+  /* SPINNER */
+  .spinner-wrap {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--bp-muted);
+    padding: 10px 0 4px;
+  }
+  .spinner-wrap.active { display: flex; }
+  .spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--bp-border);
+    border-top-color: var(--bp-green);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .progress-bar-wrap {
+    height: 3px;
+    background: var(--bp-border);
+    border-radius: 2px;
+    margin-bottom: 20px;
+    overflow: hidden;
+    display: none;
+  }
+  .progress-bar-wrap.active { display: block; }
+  .progress-bar {
+    height: 100%;
+    background: var(--bp-green);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.4s ease;
+  }
+
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.3; }
@@ -565,6 +601,16 @@
     <span id="statusText">Tap Scan Near Me to find BP stations close to you.</span>
   </div>
 
+  <!-- SPINNER -->
+  <div class="spinner-wrap" id="spinnerWrap">
+    <div class="spinner"></div>
+    <span id="spinnerText">Searching…</span>
+  </div>
+  <!-- PROGRESS BAR -->
+  <div class="progress-bar-wrap" id="progressWrap">
+    <div class="progress-bar" id="progressBar"></div>
+  </div>
+
   <div id="nationalSection" style="display:none">
     <div class="section-label">🇦🇺 Australian National Average Fuel Prices</div>
     <div class="national-prices" id="nationalPrices"></div>
@@ -699,34 +745,85 @@ async function retryPrices() {
   await fetchNationalPrices();
 }
 
-// ─── OVERPASS QUERY ───────────────────────────────────────────────
+// ─── CACHE ───────────────────────────────────────────────────────
+const _cache = {};
+function cacheKey(lat, lng, r) {
+  return `${lat.toFixed(3)},${lng.toFixed(3)},${r}`;
+}
+
+// ─── SPINNER / PROGRESS ──────────────────────────────────────────
+function showSpinner(msg) {
+  const w = document.getElementById('spinnerWrap');
+  const t = document.getElementById('spinnerText');
+  if (w) { w.classList.add('active'); if (t) t.textContent = msg || 'Searching…'; }
+}
+function hideSpinner() {
+  const w = document.getElementById('spinnerWrap');
+  if (w) w.classList.remove('active');
+}
+function setProgress(pct) {
+  const wrap = document.getElementById('progressWrap');
+  const bar  = document.getElementById('progressBar');
+  if (!wrap || !bar) return;
+  if (pct <= 0) { wrap.classList.remove('active'); bar.style.width = '0%'; return; }
+  wrap.classList.add('active');
+  bar.style.width = Math.min(pct, 100) + '%';
+  if (pct >= 100) setTimeout(() => { wrap.classList.remove('active'); bar.style.width = '0%'; }, 600);
+}
+
+// ─── OVERPASS QUERY (optimised) ──────────────────────────────────
+// Mirrors tried in order — first success wins
+const OVERPASS_MIRRORS = [
+  'https://overpass.kumi.systems/api/interpreter',  // fast EU mirror
+  'https://overpass-api.de/api/interpreter',         // original (slower)
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter', // Russia mirror, often fast
+];
+
+async function queryOverpass(query, timeoutMs = 25000) {
+  for (const mirror of OVERPASS_MIRRORS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(mirror, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(query),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = await res.json();
+      return data.elements || [];
+    } catch(e) {
+      console.warn(`Mirror ${mirror} failed:`, e.message);
+      // try next mirror
+    }
+  }
+  throw new Error('All Overpass mirrors timed out or failed. Please try again in a moment.');
+}
+
 async function fetchBPStations(lat, lng, radiusM) {
-  const q = `
-[out:json][timeout:90];
-(
-  node["amenity"="fuel"]["brand"~"^BP$",i](around:${radiusM},${lat},${lng});
-  way["amenity"="fuel"]["brand"~"^BP$",i](around:${radiusM},${lat},${lng});
-  node["amenity"="fuel"]["name"~"^BP",i](around:${radiusM},${lat},${lng});
-  way["amenity"="fuel"]["name"~"^BP",i](around:${radiusM},${lat},${lng});
-  node["amenity"="fuel"]["operator"~"^BP",i](around:${radiusM},${lat},${lng});
-  way["amenity"="fuel"]["operator"~"^BP",i](around:${radiusM},${lat},${lng});
-);
-out center tags;
-  `.trim();
-
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'data=' + encodeURIComponent(q),
-  });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`Overpass API returned ${res.status}. ${txt.includes('rate') ? 'Server busy — try again in a moment.' : 'Please try again.'}`);
+  // Return cached result if same location + radius within last 5 minutes
+  const key = cacheKey(lat, lng, radiusM);
+  if (_cache[key] && Date.now() - _cache[key].ts < 5 * 60 * 1000) {
+    console.log('Using cached station data');
+    return _cache[key].data;
   }
 
-  const data = await res.json();
-  return data.elements || [];
+  // Simplified query: union node+way in one pass using Overpass union shorthand
+  // Use brand~BP (case-insensitive) — catches "BP", "BP Express", "BP Connect" etc.
+  const q = `[out:json][timeout:30];(node["amenity"="fuel"]["brand"~"BP",i](around:${radiusM},${lat},${lng});way["amenity"="fuel"]["brand"~"BP",i](around:${radiusM},${lat},${lng}););out center tags qt;`;
+
+  setProgress(20);
+  showSpinner(radiusM > 20000 ? `Searching ${radiusM/1000} km radius — large areas take longer…` : 'Querying OpenStreetMap…');
+
+  const elements = await queryOverpass(q, radiusM > 50000 ? 35000 : 20000);
+
+  setProgress(80);
+  hideSpinner();
+
+  _cache[key] = { ts: Date.now(), data: elements };
+  return elements;
 }
 
 // ─── RENDER ───────────────────────────────────────────────────────
@@ -818,29 +915,46 @@ async function scanStations() {
   btn.disabled = true;
   document.getElementById('stationsSection').style.display = 'none';
   document.getElementById('emptyState').style.display = 'none';
+  setProgress(0);
   setStatus('Getting your location…', 'loading');
 
   try {
-    // 1. GPS
+    // 1. GPS — use low accuracy first for speed, it's good enough for nearby search
+    setProgress(5);
     const pos = await new Promise((ok, fail) =>
-      navigator.geolocation.getCurrentPosition(ok, fail, { timeout: 12000, enableHighAccuracy: true })
+      navigator.geolocation.getCurrentPosition(ok, fail, {
+        timeout: 8000,
+        enableHighAccuracy: false,  // faster — coarse location is fine for radius search
+        maximumAge: 60000           // reuse cached GPS if < 1 min old
+      })
     );
     const userLat = pos.coords.latitude;
     const userLng = pos.coords.longitude;
     const radius  = parseInt(document.getElementById('radiusSelect').value);
-    const kmLabel = radius >= 1000 ? `${radius / 1000} km` : `${radius} m`;
+    const kmLabel = `${radius / 1000} km`;
 
-    setStatus(`Location found. Fetching national prices and querying OpenStreetMap within ${kmLabel}…`, 'loading');
+    setProgress(10);
 
-    // 2. Run national prices + Overpass in parallel
-    const [auPrices, elements] = await Promise.all([
-      fetchNationalPrices(),
-      fetchBPStations(userLat, userLng, radius),
-    ]);
+    // Warn user for large radius
+    if (radius >= 100000) {
+      setStatus(`📡 Large area scan (${kmLabel}) — this may take 15–30 seconds…`, 'loading');
+    } else {
+      setStatus(`Location found. Scanning within ${kmLabel}…`, 'loading');
+    }
 
+    // 2. Kick off national prices immediately (fast, ~1s), don't await yet
+    const pricesPromise = fetchNationalPrices();
+
+    // 3. Fetch stations (this is the slow part)
+    setProgress(15);
+    const elements = await fetchBPStations(userLat, userLng, radius);
+    setProgress(90);
+
+    // 4. Now resolve prices (probably already done)
+    const auPrices = await pricesPromise;
     const basePrice = auPrices?.gasoline_liter_aud ?? null;
 
-    // 3. Deduplicate, compute distance, filter, sort
+    // 5. Deduplicate, compute distance, filter, sort
     const seen = new Set();
     const stations = elements
       .filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
@@ -853,15 +967,18 @@ async function scanStations() {
       .filter(e => e._dist <= radius / 1000)
       .sort((a, b) => a._dist - b._dist);
 
+    setProgress(100);
     setStatus(
-      `Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`,
+      `✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`,
       'done'
     );
     renderStations(stations, userLat, userLng, basePrice);
 
   } catch(err) {
+    setProgress(0);
+    hideSpinner();
     let msg = err.message;
-    if (err.code === 1) msg = 'Location access denied — please allow location access in your browser.';
+    if (err.code === 1) msg = 'Location access denied — please allow location in your browser.';
     if (err.code === 2) msg = 'Location unavailable. Please try again.';
     if (err.code === 3) msg = 'Location timed out. Please try again.';
     setStatus(msg, 'error');
