@@ -1265,7 +1265,7 @@ function renderStations(stations, userLat, userLng, basePrice) {
         <div class="station-rank">${idx + 1}</div>
         <div class="station-info">
           <div class="station-name" title="${name}">${name}</div>
-          <div class="station-address" title="${address}">${address}</div>
+          <div class="station-address" title="${address}" data-station-key="${sLat.toFixed(4)},${sLng.toFixed(4)}">${address}</div>
           ${hours ? `<div class="station-hours" style="color:${hoursClr}">⏱ ${is24h ? '24 / 7' : hours}</div>` : ''}
         </div>
         <div class="station-distance">${dist} km<small>from you</small></div>
@@ -1363,17 +1363,19 @@ async function scanStations() {
 
     setProgress(100);
 
-    // Resolve suburb names via Nominatim BEFORE rendering so PetrolSpy links are correct
-    if (stations.length > 0) {
-      setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}. Resolving suburbs…`, 'loading');
-      await enrichStationsWithSuburb(stations);
-    }
-
-    setStatus(
-      `✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`,
-      'done'
-    );
+    // Render immediately so user sees stations right away
+    setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`, 'done');
     renderStations(stations, userLat, userLng, basePrice);
+
+    // Resolve addresses in background — cards update live as each resolves
+    if (stations.length > 0) {
+      setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}. Looking up addresses…`, 'done');
+      enrichStationsWithSuburb(stations).then(() => {
+        setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`, 'done');
+        // Re-render only if PetrolSpy links need updating (suburb resolved)
+        renderStations(stations, userLat, userLng, basePrice);
+      }).catch(e => console.warn('Address enrichment failed:', e));
+    }
 
   } catch(err) {
     setProgress(0);
