@@ -1002,30 +1002,10 @@ function renderStations(stations, userLat, userLng, basePrice) {
 
     // PetrolSpy — geocode at click time using exact station coordinates
     // This guarantees the correct suburb regardless of OSM data quality
+    // PetrolSpy — open directly at station coordinates using their latlng URL format
     const psBtn = card.querySelector(`#ps-${idx}`);
-    psBtn.addEventListener('click', async () => {
-      const original = psBtn.textContent;
-      psBtn.textContent = '⏳ Looking up suburb…';
-      psBtn.disabled = true;
-
-      try {
-        const geo = await reverseGeocode(sLat, sLng);
-        const suburb = (geo?.suburb || osmSuburb || '').toLowerCase().trim();
-        const url = suburb
-          ? `https://petrolspy.com.au/map/location/au/vic/${encodeURIComponent(suburb)}`
-          : `https://petrolspy.com.au/map/location/au/vic`;
-
-        // DEBUG — remove after confirming it works
-        alert(`Coords: ${sLat}, ${sLng}\nGeo result: ${JSON.stringify(geo)}\nSuburb: "${suburb}"\nURL: ${url}`);
-
-        window.open(url, '_blank');
-      } catch(e) {
-        alert(`ERROR: ${e.message}`);
-        window.open('https://petrolspy.com.au/map/location/au/vic', '_blank');
-      } finally {
-        psBtn.textContent = original;
-        psBtn.disabled = false;
-      }
+    psBtn.addEventListener('click', () => {
+      window.open(`https://petrolspy.com.au/map/latlng/${sLat}/${sLng}`, '_blank');
     });
 
     list.appendChild(card);
