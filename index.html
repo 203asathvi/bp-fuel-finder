@@ -1136,19 +1136,41 @@ async function reverseGeocode(lat, lng) {
 
 // Geocoder 1: Nominatim (OSM) — sometimes works from GitHub Pages origin
 async function geocodeViaNominatim(lat, lng) {
+  // zoom=18 = building level — gets house numbers more reliably than zoom=16
   const res = await fetch(
-    `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=16&addressdetails=1`,
+    `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=18&addressdetails=1`,
     { headers: { 'Accept-Language': 'en', 'User-Agent': 'BPFuelFinder/1.0 (github.com/bp-fuel-finder)' } }
   );
   if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
   const data = await res.json();
   const addr = data.address || {};
-  const suburb = addr.suburb || addr.neighbourhood || addr.quarter || addr.hamlet ||
-                 addr.town || addr.village || addr.city_district || addr.municipality || addr.city || '';
-  const street  = [addr.house_number, addr.road || addr.pedestrian || addr.path].filter(Boolean).join(' ');
+
+  const suburb   = addr.suburb || addr.neighbourhood || addr.quarter || addr.hamlet ||
+                   addr.town || addr.village || addr.city_district || addr.municipality || addr.city || '';
+  const road     = addr.road || addr.pedestrian || addr.path || addr.retail || '';
   const postcode = addr.postcode || '';
-  const state   = addr.state || '';
+  const state    = addr.state || '';
+
+  let houseNum = addr.house_number || '';
+
+  // If no house number at zoom=18, try a nearby search to find the street number
+  if (!houseNum && road) {
+    try {
+      const searchRes = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(road)}&near=${lat},${lng}&format=json&limit=3&addressdetails=1`,
+        { headers: { 'Accept-Language': 'en', 'User-Agent': 'BPFuelFinder/1.0' } }
+      );
+      if (searchRes.ok) {
+        const results = await searchRes.json();
+        const nearby = results.find(r => r.address?.house_number && r.address?.road === road);
+        if (nearby) houseNum = nearby.address.house_number;
+      }
+    } catch(e) { /* skip if search fails */ }
+  }
+
+  const street = [houseNum, road].filter(Boolean).join(' ');
   if (!suburb) throw new Error('Nominatim: no suburb in response');
+
   return {
     suburb,
     postcode,
