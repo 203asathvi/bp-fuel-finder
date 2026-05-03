@@ -862,11 +862,15 @@ const LS_KEY     = 'bpff_geocache';
 // Firebase config comes from config.js (gitignored)
 // Falls back to localStorage-only if config.js is missing
 const _fbCfg = (typeof window !== 'undefined' && window.BPFF_CONFIG) || {};
-const FB_URL  = _fbCfg.FIREBASE_DB_URL || null; // e.g. 'https://your-app-default-rtdb.firebaseio.com'
+const FB_URL  = (_fbCfg.FIREBASE_DB_URL || '').replace(/\/+$/, '') || null; // strip trailing slash
 // Log Firebase status on startup
 window.addEventListener('load', () => {
-  if (FB_URL) console.log(`Firebase configured: ${FB_URL}`);
-  else console.log('Firebase not configured — localStorage only');
+  if (FB_URL) {
+    console.log(`Firebase configured: ${FB_URL}`);
+    testFirebase(); // test write on startup
+  } else {
+    console.log('Firebase not configured — localStorage only');
+  }
 });
 const FB_PATH = 'geocache';
 
@@ -926,15 +930,47 @@ async function fbRead() {
 }
 
 async function fbWrite(data) {
-  if (!FB_URL) return;
+  if (!FB_URL) return false;
   try {
-    await fetchWithTimeout(`${FB_URL}/${FB_PATH}.json`, {
+    const url = `${FB_URL}/${FB_PATH}.json`;
+    console.log(`Firebase WRITE → ${url}`, Object.keys(data).length, 'keys');
+    const res = await fetchWithTimeout(url, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
-    }, 5000);
+    }, 8000);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.error(`Firebase WRITE FAILED: HTTP ${res.status} — ${txt}`);
+      return false;
+    }
+    console.log(`Firebase WRITE OK: ${res.status}`);
+    return true;
   } catch(e) {
-    
+    console.error('Firebase WRITE ERROR:', e.message);
+    return false;
+  }
+}
+
+// Test Firebase connectivity on startup
+async function testFirebase() {
+  if (!FB_URL) { console.log('Firebase: not configured'); return; }
+  try {
+    // Write a test value
+    const testUrl = `${FB_URL}/test.json`;
+    const res = await fetchWithTimeout(testUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ts: Date.now(), msg: 'bp-fuel-finder test' }),
+    }, 5000);
+    if (res.ok) {
+      console.log('Firebase TEST WRITE: OK ✅');
+    } else {
+      const txt = await res.text().catch(() => '');
+      console.error(`Firebase TEST WRITE FAILED: HTTP ${res.status} — ${txt}`);
+    }
+  } catch(e) {
+    console.error('Firebase TEST ERROR:', e.message);
   }
 }
 
