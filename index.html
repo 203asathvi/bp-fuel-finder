@@ -894,6 +894,89 @@ async function fetchBPStations(lat, lng, radiusM) {
   return elements;
 }
 
+// ─── SERVO SAVER (Fair Fuel Open Data API) ───────────────────────────────
+// Returns real Victorian fuel prices (24hr delay), matched to stations by proximity
+
+const FUEL_TYPE_LABELS = {
+  U91: 'Unleaded 91', E10: 'E10', P95: 'Unleaded 95',
+  P98: 'Unleaded 98', DSL: 'Diesel', LPG: 'LPG', EV: 'EV',
+};
+
+let _servoPricesCache    = null;
+let _servoPricesCacheTs  = 0;
+const SERVO_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+async function fetchServoPrices() {
+  if (!SERVO_KEY) return null;
+
+  // Return cached if fresh
+  if (_servoPricesCache && Date.now() - _servoPricesCacheTs < SERVO_CACHE_TTL_MS) {
+    return _servoPricesCache;
+  }
+
+  try {
+    const res = await fetch(SERVO_API_URL, {
+      headers: {
+        'x-consumer-id':   SERVO_KEY,
+        'x-transactionid': generateUUID(),
+        'User-Agent':      'BPFuelFinder/1.0',
+      }
+    });
+    if (!res.ok) throw new Error(`Servo Saver HTTP ${res.status}`);
+    const data = await res.json();
+    _servoPricesCache   = data.fuelPriceDetails || [];
+    _servoPricesCacheTs = Date.now();
+    console.log(`Servo Saver: loaded ${_servoPricesCache.length} stations`);
+    return _servoPricesCache;
+  } catch(e) {
+    console.warn('Servo Saver fetch failed:', e.message);
+    return null;
+  }
+}
+
+// Find the closest matching Servo Saver station to OSM coordinates
+function findServoPricesForStation(allPrices, sLat, sLng) {
+  if (!allPrices || allPrices.length === 0) return null;
+
+  let closest = null;
+  let minDist = Infinity;
+
+  for (const item of allPrices) {
+    const loc = item.fuelStation?.location;
+    if (!loc) continue;
+    const d = calcDist(sLat, sLng, loc.latitude, loc.longitude);
+    if (d < minDist) {
+      minDist = d;
+      closest = item;
+    }
+  }
+
+  // Only match if within 100 metres — ensures we have the right station
+  return minDist <= 0.1 ? closest : null;
+}
+
+// Build price display HTML from Servo Saver fuel prices
+function buildPriceHtml(fuelPrices) {
+  if (!fuelPrices || fuelPrices.length === 0) return null;
+
+  const available = fuelPrices
+    .filter(f => f.isAvailable && f.price)
+    .sort((a, b) => a.price - b.price);
+
+  if (available.length === 0) return null;
+
+  const lowest = available[0];
+  const label  = FUEL_TYPE_LABELS[lowest.fuelType] || lowest.fuelType;
+  return { price: lowest.price, label, all: available };
+}
+
 // ─── GEOCODE CACHE (Firebase Realtime DB + localStorage fallback) ────────────
 // - localStorage: instant, works offline, per-device
 // - Firebase: syncs across all devices in real time
@@ -908,7 +991,9 @@ const LS_KEY     = 'bpff_geocache';
 // Firebase config comes from config.js (gitignored)
 // Falls back to localStorage-only if config.js is missing
 const _fbCfg = (typeof window !== 'undefined' && window.BPFF_CONFIG) || {};
-const FB_URL  = (_fbCfg.FIREBASE_DB_URL || '').replace(/\/+$/, '') || null; // strip trailing slash
+const FB_URL        = (_fbCfg.FIREBASE_DB_URL || '').replace(/\/+$/, '') || null;
+const SERVO_KEY     = _fbCfg.SERVO_SAVER_KEY || null;
+const SERVO_API_URL = 'https://api.fuel.service.vic.gov.au/open-data/v1/fuel/prices';
 // Log Firebase status on startup
 window.addEventListener('load', () => {
   if (FB_URL) {
@@ -1273,7 +1358,7 @@ async function reverseGeocodeWithRetry(lat, lng, attempts = 3) {
 }
 
 // ─── RENDER ───────────────────────────────────────────────────────
-function renderStations(stations, userLat, userLng, basePrice) {
+function renderStations(stations, userLat, userLng, basePrice, servoPrices = null) {
   const list = document.getElementById('stationsList');
   list.innerHTML = '';
 
@@ -1317,11 +1402,37 @@ function renderStations(stations, userLat, userLng, basePrice) {
     const mapsUrl          = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&travelmode=driving`;
     // stationSearchUrl and servoSaverUrl removed — using single Google Maps directions link
 
-    let priceHtml = '—';
-    if (basePrice) {
+    // Try Servo Saver real price first, fall back to national average estimate
+    let priceHtml   = '—';
+    let priceTitle  = 'Est. low price:';
+    let fuelTagsFromServo = null;
+
+    const servoMatch = findServoPricesForStation(servoPrices, sLat, sLng);
+    if (servoMatch) {
+      const pd = buildPriceHtml(servoMatch.fuelPrices);
+      if (pd) {
+        priceHtml  = `${pd.price}¢/L`;
+        priceTitle = `${pd.label} (live):`;
+        // Build real fuel tags from Servo Saver data
+        fuelTagsFromServo = servoMatch.fuelPrices
+          .filter(f => f.isAvailable)
+          .map(f => {
+            const label = FUEL_TYPE_LABELS[f.fuelType] || f.fuelType;
+            let cls = '';
+            if (['P95','P98'].includes(f.fuelType)) cls = 'premium';
+            else if (['DSL'].includes(f.fuelType)) cls = 'diesel';
+            else if (['LPG','EV'].includes(f.fuelType)) cls = 'lpg';
+            return `<span class="fuel-tag ${cls}" title="${f.price}¢/L">${label}</span>`;
+          }).join('');
+      }
+    } else if (basePrice) {
       const cents = (basePrice * 100 + 17 + (Math.random() * 6 - 3)).toFixed(1);
-      priceHtml = `${cents}¢/L`;
+      priceHtml  = `~${cents}¢/L`;
+      priceTitle = 'Est. low price:';
     }
+
+    // Use Servo Saver fuel tags if available (more accurate), else OSM-derived
+    const finalFuelTagsHtml = fuelTagsFromServo || fuelTagsHtml;
 
     const card = document.createElement('div');
     card.className = 'station-card';
@@ -1337,11 +1448,11 @@ function renderStations(stations, userLat, userLng, basePrice) {
         </div>
         <div class="station-distance">${dist} km<small>from you</small></div>
       </div>
-      <div class="fuel-tags">${fuelTagsHtml}</div>
+      <div class="fuel-tags">${finalFuelTagsHtml}</div>
       <div class="station-divider"></div>
       <div class="price-row">
         <div class="best-price-wrap">
-          <span class="best-price-label">Est. low price:</span>
+          <span class="best-price-label">${priceTitle}</span>
           <span class="best-price">${priceHtml}</span>
         </div>
         <a class="maps-link" id="dir-${idx}" target="_blank">🗺 Google Maps ↗</a>
@@ -1422,8 +1533,9 @@ async function scanStations() {
       setStatus(`Location found. Scanning within ${kmLabel}…`, 'loading');
     }
 
-    // 2. Kick off national prices immediately (fast, ~1s), don't await yet
+    // 2. Kick off national prices + Servo Saver simultaneously
     const pricesPromise = fetchNationalPrices();
+    const servoPromise  = fetchServoPrices(); // real VIC prices
 
     // 3. Fetch stations (this is the slow part)
     setProgress(15);
@@ -1431,8 +1543,10 @@ async function scanStations() {
     setProgress(90);
 
     // 4. Now resolve prices (probably already done)
-    const auPrices = await pricesPromise;
-    const basePrice = auPrices?.gasoline_liter_aud ?? null;
+    const auPrices   = await pricesPromise;
+    const basePrice  = auPrices?.gasoline_liter_aud ?? null;
+    const servoPrices = await servoPromise;
+    if (servoPrices) setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}. Live prices loaded.`, 'done');
 
     // 5. Deduplicate, compute distance, filter, sort
     const seen = new Set();
@@ -1451,7 +1565,7 @@ async function scanStations() {
 
     // Render immediately so user sees stations right away
     setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`, 'done');
-    renderStations(stations, userLat, userLng, basePrice);
+    renderStations(stations, userLat, userLng, basePrice, servoPrices);
 
     // Resolve addresses in background — cards update live as each resolves
     if (stations.length > 0) {
@@ -1459,7 +1573,7 @@ async function scanStations() {
       enrichStationsWithSuburb(stations).then(() => {
         setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`, 'done');
         // Re-render only if PetrolSpy links need updating (suburb resolved)
-        renderStations(stations, userLat, userLng, basePrice);
+        renderStations(stations, userLat, userLng, basePrice, servoPrices);
       }).catch(e => console.warn('Address enrichment failed:', e));
     }
 
