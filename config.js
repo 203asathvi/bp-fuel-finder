@@ -21,4 +21,5 @@
 
 window.BPFF_CONFIG = {
   FIREBASE_DB_URL: 'https://bp-fuel-tracker-default-rtdb.firebaseio.com',
+  SERVO_SAVER_KEY: 'f6a1f76f7e6ef46bd3ef4a5bcc23902b',
 };
