@@ -1547,7 +1547,6 @@ async function scanStations() {
     const auPrices   = await pricesPromise;
     const basePrice  = auPrices?.gasoline_liter_aud ?? null;
     const servoPrices = await servoPromise;
-    if (servoPrices) setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}. Live prices loaded.`, 'done');
 
     // 5. Deduplicate, compute distance, filter, sort
     const seen = new Set();
