@@ -992,8 +992,10 @@ const LS_KEY     = 'bpff_geocache';
 // Falls back to localStorage-only if config.js is missing
 const _fbCfg = (typeof window !== 'undefined' && window.BPFF_CONFIG) || {};
 const FB_URL        = (_fbCfg.FIREBASE_DB_URL || '').replace(/\/+$/, '') || null;
-const SERVO_KEY     = _fbCfg.SERVO_SAVER_KEY || null;
-const SERVO_API_URL = 'https://api.fuel.service.vic.gov.au/open-data/v1/fuel/prices';
+const SERVO_KEY      = _fbCfg.SERVO_SAVER_KEY || null;
+const SERVO_PROXY    = (_fbCfg.SERVO_PROXY_URL || '').replace(/\/+$/, '') || null;
+// Use proxy URL if configured (needed for CORS from browser), else direct
+const SERVO_API_URL  = SERVO_PROXY || 'https://api.fuel.service.vic.gov.au/open-data/v1/fuel/prices';
 // Log Firebase status on startup
 window.addEventListener('load', () => {
   if (FB_URL) {
