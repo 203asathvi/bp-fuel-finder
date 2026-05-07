@@ -681,6 +681,7 @@
       <option value="P95">Unleaded 95</option>
       <option value="P98">Unleaded 98</option>
       <option value="DSL">Diesel</option>
+      <option value="PDSL">Premium Diesel</option>
       <option value="LPG">LPG</option>
     </select>
   </div>
@@ -968,8 +969,16 @@ async function fetchBPStations(lat, lng, radiusM) {
 // Returns real Victorian fuel prices (24hr delay), matched to stations by proximity
 
 const FUEL_TYPE_LABELS = {
-  U91: 'Unleaded 91', E10: 'E10', P95: 'Unleaded 95',
-  P98: 'Unleaded 98', DSL: 'Diesel', LPG: 'LPG', EV: 'EV',
+  U91:  'Unleaded 91',
+  E10:  'E10',
+  P95:  'Unleaded 95',
+  P98:  'Unleaded 98',
+  DSL:  'Diesel',
+  PDSL: 'Premium Diesel',
+  LPG:  'LPG',
+  EV:   'EV Charging',
+  B20:  'Biodiesel B20',
+  E85:  'E85',
 };
 
 let _servoPricesCache    = null;
@@ -1419,23 +1428,64 @@ async function enrichStationsWithSuburb(stations) {
   return stations;
 }
 
-// Retry wrapper — tries up to 3 times with 1s backoff
-async function reverseGeocodeWithRetry(lat, lng, attempts = 3) {
+// Retry wrapper — tries up to 4 times with exponential backoff
+async function reverseGeocodeWithRetry(lat, lng, attempts = 4) {
   for (let i = 0; i < attempts; i++) {
     const result = await reverseGeocode(lat, lng);
     if (result && result.suburb) return result;
-    if (i < attempts - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    if (i < attempts - 1) {
+      const wait = 1000 * Math.pow(2, i); // 1s, 2s, 4s
+      console.warn(`Geocode retry ${i + 1}/${attempts - 1} for ${lat},${lng} — waiting ${wait}ms`);
+      await new Promise(r => setTimeout(r, wait));
+    }
   }
-  return null;
+  // Last resort: return coordinates as address so card isn't blank
+  return {
+    suburb: '',
+    postcode: '',
+    state: '',
+    fullAddress: `${parseFloat(lat).toFixed(4)}, ${parseFloat(lng).toFixed(4)}`,
+  };
 }
 
 // ─── RENDER ───────────────────────────────────────────────────────
+// Get the price for a specific fuel type at a station from Servo Saver data
+function getStationFuelPrice(servoPrices, sLat, sLng, fuelType) {
+  const match = findServoPricesForStation(servoPrices, sLat, sLng);
+  if (!match || !match.fuelPrices) return null;
+  const fuel = match.fuelPrices.find(f => f.fuelType === fuelType && f.isAvailable && f.price);
+  return fuel ? fuel.price : null;
+}
+
+// Sort stations: by selected fuel price (cheapest first), or by distance if All Fuels
+function sortStations(stations, servoPrices, selectedFuel) {
+  if (selectedFuel === 'ALL' || !servoPrices) {
+    return [...stations].sort((a, b) => a._dist - b._dist);
+  }
+  return [...stations].sort((a, b) => {
+    const aLat = parseFloat(a.lat ?? a.center?.lat);
+    const aLng = parseFloat(a.lon  ?? a.center?.lon);
+    const bLat = parseFloat(b.lat ?? b.center?.lat);
+    const bLng = parseFloat(b.lon  ?? b.center?.lon);
+    const aPrice = getStationFuelPrice(servoPrices, aLat, aLng, selectedFuel);
+    const bPrice = getStationFuelPrice(servoPrices, bLat, bLng, selectedFuel);
+    // Stations with no price go to the bottom
+    if (aPrice === null && bPrice === null) return a._dist - b._dist;
+    if (aPrice === null) return 1;
+    if (bPrice === null) return -1;
+    return aPrice - bPrice; // cheapest first
+  });
+}
+
 function renderStations(stations, userLat, userLng, basePrice, servoPrices = null) {
   _lastRenderArgs = [stations, userLat, userLng, basePrice, servoPrices];
+  const selectedFuel = document.getElementById('fuelSelect')?.value || 'ALL';
+  const sorted = sortStations(stations, servoPrices, selectedFuel);
+
   const list = document.getElementById('stationsList');
   list.innerHTML = '';
 
-  if (stations.length === 0) {
+  if (sorted.length === 0) {
     document.getElementById('stationsSection').style.display = 'none';
     document.getElementById('emptyState').style.display = 'block';
     return;
@@ -1443,9 +1493,9 @@ function renderStations(stations, userLat, userLng, basePrice, servoPrices = nul
 
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('stationsSection').style.display = 'block';
-  document.getElementById('stationCount').textContent = stations.length;
+  document.getElementById('stationCount').textContent = sorted.length;
 
-  stations.forEach((s, idx) => {
+  sorted.forEach((s, idx) => {
     const tags = s.tags || {};
 
     // Guard: nodes have lat/lon directly, ways have center.lat/center.lon
@@ -1513,7 +1563,7 @@ function renderStations(stations, userLat, userLng, basePrice, servoPrices = nul
           const label = FUEL_TYPE_LABELS[f.fuelType] || f.fuelType;
           let cls = '';
           if (['P95','P98'].includes(f.fuelType)) cls = 'premium';
-          else if (['DSL'].includes(f.fuelType)) cls = 'diesel';
+          else if (['DSL','PDSL','B20'].includes(f.fuelType)) cls = 'diesel';
           else if (['LPG','EV'].includes(f.fuelType)) cls = 'lpg';
           const isHl = selectedFuel !== 'ALL' && f.fuelType === selectedFuel;
           return `<span class="fuel-tag ${cls}" style="${isHl ? 'outline:1px solid #4dff91' : ''}">${label} ${f.price}¢</span>`;
@@ -1671,12 +1721,14 @@ async function scanStations() {
         return e;
       })
       .filter(e => e._dist <= radius / 1000)
-      .sort((a, b) => a._dist - b._dist);
+      .sort((a, b) => a._dist - b._dist); // initial sort by distance, re-sorted in renderStations
 
     setProgress(100);
 
     // Render immediately so user sees stations right away
-    setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}.`, 'done');
+    const fuelSel = document.getElementById('fuelSelect')?.value || 'ALL';
+    const sortDesc = fuelSel !== 'ALL' ? `, sorted by ${FUEL_TYPE_LABELS[fuelSel] || fuelSel} price` : '';
+    setStatus(`✅ Found ${stations.length} BP station${stations.length !== 1 ? 's' : ''} within ${kmLabel}${sortDesc}.`, 'done');
     renderStations(stations, userLat, userLng, basePrice, servoPrices);
 
     // Resolve addresses in background — cards update live as each resolves
