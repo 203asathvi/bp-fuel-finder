@@ -539,6 +539,18 @@
     color: #4dff91;
   }
 
+  .btn-servosaver {
+    background: rgba(0,100,200,0.1);
+    border: 1px solid rgba(0,100,200,0.35);
+    color: #6aabff;
+    text-decoration: none;
+  }
+
+  .btn-servosaver:hover {
+    background: rgba(0,100,200,0.2);
+    border-color: #6aabff;
+  }
+
 
 
   .empty-state {
@@ -564,6 +576,56 @@
     padding: 12px 16px;
     font-size: 13px;
   }
+
+  /* FUEL SELECTOR */
+  .fuel-select {
+    background: var(--bp-card);
+    border: 1px solid var(--bp-border);
+    color: var(--bp-text);
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-family: 'Barlow Condensed', sans-serif;
+    font-size: 14px;
+    outline: none;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+  }
+
+  /* PRICE TABLE inside card */
+  .price-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-size: 12px;
+  }
+  .price-table tr {
+    border-bottom: 1px solid var(--bp-border);
+  }
+  .price-table tr:last-child { border-bottom: none; }
+  .price-table td {
+    padding: 5px 4px;
+    color: var(--bp-muted);
+  }
+  .price-table td:first-child {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--bp-text);
+    width: 110px;
+  }
+  .price-table td:last-child {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-weight: 700;
+    font-size: 16px;
+    color: var(--bp-yellow);
+    text-align: right;
+  }
+  .price-table tr.selected-fuel {
+    background: rgba(0,155,78,0.1);
+    border-radius: 4px;
+  }
+  .price-table tr.selected-fuel td { color: #fff; }
+  .price-table tr.selected-fuel td:last-child { color: #4dff91; }
 
   footer {
     text-align: center;
@@ -611,6 +673,15 @@
       <option value="50000">Within 50 km</option>
       <option value="100000">Within 100 km</option>
       <option value="200000">Within 200 km</option>
+    </select>
+    <select class="fuel-select" id="fuelSelect" onchange="onFuelChange()">
+      <option value="ALL">All Fuels</option>
+      <option value="U91">Unleaded 91</option>
+      <option value="E10">E10</option>
+      <option value="P95">Unleaded 95</option>
+      <option value="P98">Unleaded 98</option>
+      <option value="DSL">Diesel</option>
+      <option value="LPG">LPG</option>
     </select>
   </div>
 
@@ -1360,6 +1431,7 @@ async function reverseGeocodeWithRetry(lat, lng, attempts = 3) {
 
 // ─── RENDER ───────────────────────────────────────────────────────
 function renderStations(stations, userLat, userLng, basePrice, servoPrices = null) {
+  _lastRenderArgs = [stations, userLat, userLng, basePrice, servoPrices];
   const list = document.getElementById('stationsList');
   list.innerHTML = '';
 
@@ -1403,36 +1475,61 @@ function renderStations(stations, userLat, userLng, basePrice, servoPrices = nul
     const mapsUrl          = `https://www.google.com/maps/dir/?api=1&destination=${sLat},${sLng}&travelmode=driving`;
     // stationSearchUrl and servoSaverUrl removed — using single Google Maps directions link
 
-    // Try Servo Saver real price first, fall back to national average estimate
-    let priceHtml   = '—';
-    let priceTitle  = 'Est. low price:';
-    let fuelTagsFromServo = null;
+    // Build price table from Servo Saver or fallback to estimate
+    const selectedFuel = document.getElementById('fuelSelect')?.value || 'ALL';
+    const servoMatch   = findServoPricesForStation(servoPrices, sLat, sLng);
 
-    const servoMatch = findServoPricesForStation(servoPrices, sLat, sLng);
-    if (servoMatch) {
-      const pd = buildPriceHtml(servoMatch.fuelPrices);
-      if (pd) {
-        priceHtml  = `${pd.price}¢/L`;
-        priceTitle = `${pd.label} (live):`;
-        // Build real fuel tags from Servo Saver data
-        fuelTagsFromServo = servoMatch.fuelPrices
-          .filter(f => f.isAvailable)
-          .map(f => {
-            const label = FUEL_TYPE_LABELS[f.fuelType] || f.fuelType;
-            let cls = '';
-            if (['P95','P98'].includes(f.fuelType)) cls = 'premium';
-            else if (['DSL'].includes(f.fuelType)) cls = 'diesel';
-            else if (['LPG','EV'].includes(f.fuelType)) cls = 'lpg';
-            return `<span class="fuel-tag ${cls}" title="${f.price}¢/L">${label}</span>`;
-          }).join('');
+    let priceTableHtml  = '';
+    let fuelTagsFromServo = null;
+    let highlightFuel   = null;
+
+    if (servoMatch && servoMatch.fuelPrices) {
+      const available = servoMatch.fuelPrices
+        .filter(f => f.isAvailable && f.price)
+        .sort((a, b) => {
+          // Sort: selected fuel first, then by price
+          if (selectedFuel !== 'ALL') {
+            if (a.fuelType === selectedFuel) return -1;
+            if (b.fuelType === selectedFuel) return 1;
+          }
+          return a.price - b.price;
+        });
+
+      if (available.length > 0) {
+        priceTableHtml = '<table class="price-table">';
+        for (const f of available) {
+          const label    = FUEL_TYPE_LABELS[f.fuelType] || f.fuelType;
+          const isSelected = selectedFuel !== 'ALL' && f.fuelType === selectedFuel;
+          priceTableHtml += `<tr class="${isSelected ? 'selected-fuel' : ''}">
+            <td>${label}</td>
+            <td>${f.price}¢/L</td>
+          </tr>`;
+          if (isSelected) highlightFuel = { label, price: f.price };
+        }
+        priceTableHtml += '</table>';
+
+        // Build fuel tags from Servo Saver
+        fuelTagsFromServo = available.map(f => {
+          const label = FUEL_TYPE_LABELS[f.fuelType] || f.fuelType;
+          let cls = '';
+          if (['P95','P98'].includes(f.fuelType)) cls = 'premium';
+          else if (['DSL'].includes(f.fuelType)) cls = 'diesel';
+          else if (['LPG','EV'].includes(f.fuelType)) cls = 'lpg';
+          const isHl = selectedFuel !== 'ALL' && f.fuelType === selectedFuel;
+          return `<span class="fuel-tag ${cls}" style="${isHl ? 'outline:1px solid #4dff91' : ''}">${label} ${f.price}¢</span>`;
+        }).join('');
       }
-    } else if (basePrice) {
-      const cents = (basePrice * 100 + 17 + (Math.random() * 6 - 3)).toFixed(1);
-      priceHtml  = `~${cents}¢/L`;
-      priceTitle = 'Est. low price:';
     }
 
-    // Use Servo Saver fuel tags if available (more accurate), else OSM-derived
+    // Fallback estimate if no Servo Saver data
+    if (!priceTableHtml && basePrice) {
+      const cents = (basePrice * 100 + 17 + (Math.random() * 6 - 3)).toFixed(1);
+      priceTableHtml = `<div style="font-size:12px;color:var(--bp-muted)">Est. low price: <span style="font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:18px;color:var(--bp-yellow)">${cents}¢/L</span></div>`;
+    } else if (!priceTableHtml) {
+      priceTableHtml = `<div style="font-size:12px;color:var(--bp-muted)">Price data unavailable</div>`;
+    }
+
+    // Use Servo Saver fuel tags if available
     const finalFuelTagsHtml = fuelTagsFromServo || fuelTagsHtml;
 
     const card = document.createElement('div');
@@ -1451,21 +1548,26 @@ function renderStations(stations, userLat, userLng, basePrice, servoPrices = nul
       </div>
       <div class="fuel-tags">${finalFuelTagsHtml}</div>
       <div class="station-divider"></div>
-      <div class="price-row">
-        <div class="best-price-wrap">
-          <span class="best-price-label">${priceTitle}</span>
-          <span class="best-price">${priceHtml}</span>
-        </div>
+      ${priceTableHtml}
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
         <a class="maps-link" id="dir-${idx}" target="_blank">🗺 Google Maps ↗</a>
       </div>
       <div class="live-btn-row">
-        <button class="live-price-btn btn-petrolspy" id="ps-${idx}">⛽ PetrolSpy Prices ↗</button>
+        <button class="live-price-btn btn-petrolspy" id="ps-${idx}">⛽ PetrolSpy ↗</button>
+        <a class="live-price-btn btn-servosaver" id="sv-${idx}" target="_blank">🏛 Servo Saver ↗</a>
         <button class="live-price-btn btn-copy" id="cp-${idx}">📋 Copy Address</button>
       </div>
     `;
 
     // Directions link
     card.querySelector(`#dir-${idx}`).href = mapsUrl;
+
+    // Servo Saver — deep link to VIC fuel price checker for this suburb
+    const svBtn = card.querySelector(`#sv-${idx}`);
+    const svSuburb = (osmSuburb || s._resolvedSuburb || '').toLowerCase().trim();
+    svBtn.href = svSuburb
+      ? `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver#${encodeURIComponent(svSuburb)}`
+      : `https://service.vic.gov.au/find-services/transport-and-driving/servo-saver`;
 
     // Copy Address button — copies address then opens Waze hint
     const cpBtn = card.querySelector(`#cp-${idx}`);
@@ -1499,6 +1601,16 @@ function renderStations(stations, userLat, userLng, basePrice, servoPrices = nul
 
     list.appendChild(card);
   });
+}
+
+// ─── FUEL CHANGE HANDLER ────────────────────────────────────────────────────
+let _lastRenderArgs = null; // store last render args to re-render on fuel change
+
+function onFuelChange() {
+  if (_lastRenderArgs) {
+    const [stations, userLat, userLng, basePrice, servoPrices] = _lastRenderArgs;
+    renderStations(stations, userLat, userLng, basePrice, servoPrices);
+  }
 }
 
 // ─── MAIN ────────────────────────────────────────────────────────
