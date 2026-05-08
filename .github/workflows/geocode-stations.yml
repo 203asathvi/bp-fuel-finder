@@ -1,1 +1,27 @@
+name: Daily BP Station Geocoder
 
+on:
+  schedule:
+    - cron: '0 14 * * *'  # 14:00 UTC = midnight AEST
+  workflow_dispatch:       # allow manual trigger from GitHub Actions tab
+
+jobs:
+  geocode:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run geocoder
+        env:
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+        run: python scripts/geocode_stations.py
