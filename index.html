@@ -1675,13 +1675,26 @@ async function scanStations() {
   try {
     // 1. GPS — use low accuracy first for speed, it's good enough for nearby search
     setProgress(5);
-    const pos = await new Promise((ok, fail) =>
-      navigator.geolocation.getCurrentPosition(ok, fail, {
-        timeout: 8000,
-        enableHighAccuracy: false,  // faster — coarse location is fine for radius search
-        maximumAge: 60000           // reuse cached GPS if < 1 min old
-      })
-    );
+    // Try high accuracy first, fall back to low accuracy if it times out
+    const pos = await new Promise((ok, fail) => {
+      // First attempt: low accuracy, generous timeout, accept cached position
+      navigator.geolocation.getCurrentPosition(ok, (err) => {
+        if (err.code === err.TIMEOUT || err.code === err.POSITION_UNAVAILABLE) {
+          // Second attempt: force fresh low-accuracy fix with longer timeout
+          navigator.geolocation.getCurrentPosition(ok, fail, {
+            timeout: 20000,
+            enableHighAccuracy: false,
+            maximumAge: 0  // force fresh fix
+          });
+        } else {
+          fail(err);
+        }
+      }, {
+        timeout: 10000,
+        enableHighAccuracy: false,
+        maximumAge: 120000  // accept position up to 2 mins old
+      });
+    });
     const userLat = pos.coords.latitude;
     const userLng = pos.coords.longitude;
     const radius  = parseInt(document.getElementById('radiusSelect').value);
