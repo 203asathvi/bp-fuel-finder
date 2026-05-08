@@ -37,11 +37,27 @@ def fetch_vic_bp_stations():
 );
 out center tags;
 """
-    r = requests.post(OVERPASS_URL, data={'data': query}, timeout=90)
-    r.raise_for_status()
-    elements = r.json().get('elements', [])
-    print(f"Found {len(elements)} BP stations in Victoria")
-    return elements
+    headers = {
+        'User-Agent': 'BPFuelFinder-DailyGeocoder/1.0 (github-actions)',
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }
+    mirrors = [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter',
+    ]
+    for mirror in mirrors:
+        try:
+            print(f"  Trying {mirror}...")
+            r = requests.post(mirror, data={'data': query}, headers=headers, timeout=90)
+            r.raise_for_status()
+            elements = r.json().get('elements', [])
+            print(f"Found {len(elements)} BP stations in Victoria")
+            return elements
+        except Exception as e:
+            print(f"  Mirror failed: {e}")
+            time.sleep(3)
+    raise Exception("All Overpass mirrors failed")"  
 
 # ── Load existing Firebase geocache ───────────────────────────────────────────
 def load_firebase_cache():
