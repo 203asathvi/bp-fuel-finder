@@ -1077,9 +1077,12 @@ const SERVO_PROXY    = (_fbCfg.SERVO_PROXY_URL || '').replace(/\/+$/, '') || nul
 const SERVO_API_URL  = SERVO_PROXY || 'https://api.fuel.service.vic.gov.au/open-data/v1/fuel/prices';
 // Log Firebase status on startup
 window.addEventListener('load', () => {
+  // Start preloading geocache immediately — will be ready by the time user taps Scan
+  prewarmGeoCache();
+
   if (FB_URL) {
     console.log(`Firebase configured: ${FB_URL}`);
-    testFirebase(); // test write on startup
+    testFirebase();
   } else {
     console.log('Firebase not configured — localStorage only');
   }
@@ -1206,35 +1209,29 @@ async function testFirebase() {
   }
 }
 
-// ── Load: localStorage instantly, Firebase in background (non-blocking) ──
-async function loadGeoCache() {
-  if (_geoCacheLoaded) return;
+// ── Pre-load Firebase cache as soon as page loads ────────────────────────
+// This runs immediately so by the time user taps Scan, cache is ready
+let _fbLoadPromise = null;
 
-  // 1. Load localStorage immediately — geocoding can start right away
+function prewarmGeoCache() {
+  // 1. Load localStorage immediately
   _geoCache = lsLoad();
-  const localCount = Object.keys(_geoCache).length;
-  
+  const count = Object.keys(_geoCache).length;
+  const osmCount = Object.keys(_geoCache).filter(k => k.startsWith('osm_')).length;
+  console.log(`Geocache: ${count} entries (${osmCount} by OSM ID, ${count - osmCount} by coords)`);
 
-  // Mark as loaded immediately so geocoding isn't blocked by Firebase
-  _geoCacheLoaded = true;
-
-  // 2. Merge Firebase in background — non-blocking
-  // Geocoding proceeds with localStorage while Firebase loads
+  // 2. Start Firebase fetch immediately — store promise so we can await it
   if (FB_URL) {
-    fbRead().then(cloud => {
+    _fbLoadPromise = fbRead().then(cloud => {
       const cloudEmpty = !cloud || Object.keys(cloud).length === 0;
-
       if (cloudEmpty) {
-        // Firebase is empty — push entire localStorage cache up to sync it
         const localEntries = Object.keys(_geoCache).length;
         if (localEntries > 0) {
           console.log(`Firebase empty — uploading ${localEntries} localStorage entries`);
-          fbWrite(_geoCache).catch(e => console.warn('Initial Firebase upload failed:', e));
+          fbWrite(_geoCache).catch(e => console.warn('Firebase upload failed:', e));
         }
         return;
       }
-
-      // Firebase has data — merge into local cache
       let merged = 0;
       for (const [k, v] of Object.entries(cloud)) {
         if (!v || !v.suburb || v.suburb === 'undefined' || v.suburb === '') continue;
@@ -1245,25 +1242,31 @@ async function loadGeoCache() {
       }
       if (merged > 0) {
         lsSave(_geoCache);
-        console.log(`Firebase: merged ${merged} new entries`);
-        fbWrite(_geoCache).catch(() => {});
+        console.log(`Firebase: merged ${merged} new entries into cache`);
       } else {
         console.log('Firebase: cache already up to date');
       }
-    }).catch(e => console.warn('Firebase background merge failed:', e.message));
+    }).catch(e => console.warn('Firebase preload failed:', e.message));
+  } else {
+    _fbLoadPromise = Promise.resolve();
   }
 }
 
-// ── Save: localStorage + Firebase simultaneously ──────────────────────────
-async function saveGeoCache(newEntries) {
-  if (!_geoDirty) return;
-  lsSave(_geoCache);
-  if (FB_URL && Object.keys(newEntries).length > 0) {
-    await fbWrite(newEntries); // only push new/updated keys — saves bandwidth
+// ── Load: await Firebase preload if still in progress ────────────────────
+async function loadGeoCache() {
+  if (_geoCacheLoaded) return;
+
+  // Wait for Firebase preload to complete (started on page load)
+  // If already done, this resolves instantly
+  if (_fbLoadPromise) {
+    await _fbLoadPromise;
   }
-  _geoDirty = false;
-  console.log(`Saved ${Object.keys(newEntries).length} new entries to cache`);
+
+  _geoCacheLoaded = true;
+  console.log(`Geocache ready: ${Object.keys(_geoCache).length} total entries`);
 }
+
+// saveGeoCache is now inline in enrichStationsWithSuburb
 
 // ── Reverse geocode with cache ────────────────────────────────────────────
 async function reverseGeocode(lat, lng) {
@@ -1367,68 +1370,50 @@ async function geocodeViaGeocodeXYZ(lat, lng) {
 async function enrichStationsWithSuburb(stations) {
   if (stations.length === 0) return stations;
 
-  // Load cache (localStorage instant + Firebase merge)
+  // Wait for Firebase cache to be ready (preloaded on page open)
   await loadGeoCache();
 
-  const now = Date.now();
-  const newEntries = {};
+  const stationKey  = s => `osm_${s.type || 'node'}_${s.id}`;
+  const coordKey    = s => {
+    const lat = parseFloat(s.lat ?? s.center?.lat);
+    const lng = parseFloat(s.lon  ?? s.center?.lon);
+    return `${lat.toFixed(4)},${lng.toFixed(4)}`;
+  };
 
-  const cacheKeys = Object.keys(_geoCache);
-  console.log(`Cache has ${cacheKeys.length} keys. First few: ${cacheKeys.slice(0,3).join(' | ')}`);
+  let resolved = 0;
+  let missing  = 0;
 
-  stations.forEach(s => {
-    const sLat = parseFloat(s.lat ?? s.center?.lat);
-    const sLng = parseFloat(s.lon  ?? s.center?.lon);
-    const key  = `${sLat.toFixed(4)},${sLng.toFixed(4)}`;
-    const hit  = !!_geoCache[key];
-    
-  });
+  for (const s of stations) {
+    // Try OSM ID key first (set by daily GitHub Actions geocoder)
+    // Fall back to coord key for backward compat
+    const geo = _geoCache[stationKey(s)] || _geoCache[coordKey(s)];
 
-  // Split into cached (instant) and uncached (need API call)
-  const cached   = stations.filter(s => {
-    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
-    return _geoCache[key] && (now - (_geoCache[key].ts || 0)) < GEO_TTL_MS;
-  });
-  const uncached = stations.filter(s => {
-    const key = `${parseFloat(s.lat ?? s.center?.lat).toFixed(4)},${parseFloat(s.lon ?? s.center?.lon).toFixed(4)}`;
-    return !_geoCache[key] || (now - (_geoCache[key].ts || 0)) >= GEO_TTL_MS;
-  });
-  
-
-  // Apply cached immediately — zero latency
-  for (const s of cached) {
-    const sLat = parseFloat(s.lat ?? s.center?.lat);
-    const sLng = parseFloat(s.lon  ?? s.center?.lon);
-    const key  = `${sLat.toFixed(4)},${sLng.toFixed(4)}`;
-    const geo  = _geoCache[key];
-    if (geo) { s._resolvedSuburb = geo.suburb; s._resolvedAddress = geo.fullAddress; }
-  }
-
-  // Stagger uncached requests to avoid rate limiting — 700ms between each
-  for (let i = 0; i < uncached.length; i++) {
-    const s    = uncached[i];
-    const sLat = parseFloat(s.lat ?? s.center?.lat);
-    const sLng = parseFloat(s.lon  ?? s.center?.lon);
-    const key  = `${sLat.toFixed(4)},${sLng.toFixed(4)}`;
-
-    const geo = await reverseGeocodeWithRetry(sLat, sLng);
-    if (geo) {
-      s._resolvedSuburb  = geo.suburb;
+    if (geo && geo.fullAddress) {
+      s._resolvedSuburb  = geo.suburb  || '';
       s._resolvedAddress = geo.fullAddress;
-      newEntries[key]    = geo;
+      resolved++;
+      // Update card address immediately
+      const addrEl = document.querySelector(`[data-station-key="${coordKey(s)}"]`);
+      if (addrEl) addrEl.textContent = geo.fullAddress;
+    } else {
+      missing++;
+      // Address not in Firebase yet — GitHub Actions will add it tonight
+      // Show coordinates as fallback so card isn't blank
+      const lat = parseFloat(s.lat ?? s.center?.lat).toFixed(4);
+      const lng = parseFloat(s.lon  ?? s.center?.lon).toFixed(4);
+      s._resolvedAddress = `${lat}, ${lng}`;
+      const addrEl = document.querySelector(`[data-station-key="${coordKey(s)}"]`);
+      if (addrEl) addrEl.textContent = `📍 ${lat}, ${lng}`;
     }
-
-    // Stagger requests — 700ms gap to respect rate limits
-    if (i < uncached.length - 1) await new Promise(r => setTimeout(r, 700));
   }
 
-  // Save new entries to localStorage + Firebase
-  if (_geoDirty) saveGeoCache(newEntries).catch(e => console.warn('Save failed:', e));
+  console.log(`Addresses: ${resolved} from Firebase cache, ${missing} not yet geocoded`);
+  if (missing > 0) console.log(`ℹ️ ${missing} stations will be geocoded tonight by GitHub Actions`);
 
   return stations;
 }
 
-// Retry wrapper — tries up to 4 times with exponential backoff
+
 async function reverseGeocodeWithRetry(lat, lng, attempts = 4) {
   for (let i = 0; i < attempts; i++) {
     const result = await reverseGeocode(lat, lng);
