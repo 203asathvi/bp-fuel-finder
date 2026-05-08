@@ -57,7 +57,7 @@ out center tags;
         except Exception as e:
             print(f"  Mirror failed: {e}")
             time.sleep(3)
-    raise Exception("All Overpass mirrors failed")"  
+    raise Exception("All Overpass mirrors failed")
 
 # ── Load existing Firebase geocache ───────────────────────────────────────────
 def load_firebase_cache():
